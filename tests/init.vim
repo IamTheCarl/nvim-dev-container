@@ -1,17 +1,17 @@
-set rtp=.,../plenary.nvim,../nvim-treesitter,$VIMRUNTIME
+set rtp+=.
 
-runtime! plugin/plenary.vim
-runtime! plugin/nvim-treesitter.vim
+set noswapfile
 
 lua << EOF
-require'nvim-treesitter.configs'.setup {
-  ensure_installed = { "json" },
-  -- Install parsers synchronously (only applied to `ensure_installed`)
-  sync_install = true,
-}
+require("nvim-treesitter").install({'json'}):wait(6000)
 
 -- Changing path_sep for tests - for Windows tests compatibility
 require("devcontainer.internal.utils").path_sep = "/"
+
+vim.api.nvim_create_user_command("RunTests", function(opts)
+  local path = opts.fargs[1] or "tests"
+  require("plenary.test_harness").test_directory(path, { init = "./tests/init.vim" })
+end, { nargs = "?" })
 EOF
 
 function! StatusLine()

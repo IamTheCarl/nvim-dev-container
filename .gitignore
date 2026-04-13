@@ -44,3 +44,6 @@ build/
 
 # local vimrc
 .vimrc
+
+# Test environment
+.testenv

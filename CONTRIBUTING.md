@@ -41,9 +41,7 @@ Documentation is generated using [lemmy-help](https://github.com/numToStr/lemmy-
 
 ## Running tests
 
-Running tests requires [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) and [nvim-treesitter](https://github.com/nvim-treesitter/nvim-treesitter) to be checked out in the parent directory of this repository.
-
 Tests can then be run with:
 ```
-nvim --headless --noplugin -u tests/init.vim -c "PlenaryBustedDirectory tests/ {minimal_init = 'tests/init.vim'}"
+scripts/test
 ```

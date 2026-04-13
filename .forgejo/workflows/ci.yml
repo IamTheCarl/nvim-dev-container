@@ -64,11 +64,5 @@ jobs:
         with:
           neovim: true
           version: stable
-      - name: Checkout plenary
-        run: git clone https://github.com/nvim-lua/plenary.nvim ~/.local/share/nvim/site/pack/vendor/start/plenary.nvim
-      - name: Checkout treesitter
-        run: git clone https://github.com/nvim-treesitter/nvim-treesitter ~/.local/share/nvim/site/pack/vendor/start/nvim-treesitter
-      - name: Link plenary and treesitter
-        run: ln -s "$(pwd)" ~/.local/share/nvim/site/pack/vendor/start
       - name: Run tests
         run: scripts/test
