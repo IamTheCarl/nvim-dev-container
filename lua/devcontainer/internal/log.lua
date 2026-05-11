@@ -7,7 +7,8 @@
 local config = require("devcontainer.config")
 local M = {}
 
-M.logfile = string.format("%s/%s.log", vim.api.nvim_call_function("stdpath", { "cache" }), "devcontainer")
+M.logdir = vim.api.nvim_call_function("stdpath", { "cache" })
+M.logfile = string.format("%s/%s.log", M.logdir, "devcontainer")
 
 -- Level configuration
 M.modes = {
@@ -41,6 +42,7 @@ function M.log_at_level(level, level_config, message_maker, ...)
 
   local msg = message_maker(...)
 
+  assert(vim.loop.fs_mkdir(M.logfile, tonumber("755", 8)))
   local fp = assert(io.open(M.logfile, "a"))
   local str = string.format("[%-6s%s]: %s\n", nameupper, os.date(), msg)
   fp:write(str)
