@@ -45,7 +45,7 @@ export XDG_STATE_HOME="$SCRIPT_DIR/.testenv/state"
 export XDG_RUNTIME_DIR="$SCRIPT_DIR/.testenv/run"
 export XDG_CACHE_HOME="$SCRIPT_DIR/.testenv/cache"
 
-if [[ $OPEN_NVIM -eq 1 ]]; then
+if [ $OPEN_NVIM -eq 1 ]; then
   nvim -u tests/init.vim
 else
   nvim --headless -u tests/init.vim \
