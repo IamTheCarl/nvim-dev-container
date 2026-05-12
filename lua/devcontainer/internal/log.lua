@@ -42,7 +42,8 @@ function M.log_at_level(level, level_config, message_maker, ...)
 
   local msg = message_maker(...)
 
-  assert(vim.loop.fs_mkdir(M.logfile, tonumber("755", 8)))
+  local err, err_str = vim.loop.fs_mkdir(M.logdir, tonumber("755", 8))
+  assert(not err and err_str ~= "EEXIST", "Failed to create log directory: " .. err_str)
   local fp = assert(io.open(M.logfile, "a"))
   local str = string.format("[%-6s%s]: %s\n", nameupper, os.date(), msg)
   fp:write(str)
