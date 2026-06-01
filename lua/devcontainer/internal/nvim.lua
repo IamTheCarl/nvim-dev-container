@@ -1,113 +1,77 @@
 ---@mod devcontainer.internal.nvim Neovim in container related commands
 ---@brief [[
----Provides high level commands related to using neovim inside container
+---Provides high level commands related to using Neovim inside a container.
+---Installation is delegated to `devcontainer.internal.installer`, which
+---uses `nix bundle` + `docker exec -i` to stream a self-contained Neovim
+---into the container at `$HOME/.nvim-devcontainer/bin/nvim`.
 ---@brief ]]
 
 local M = {}
 
 local log = require("devcontainer.internal.log")
 local v = require("devcontainer.internal.validation")
-local u = require("devcontainer.internal.utils")
-local status = require("devcontainer.status")
 local config = require("devcontainer.config")
-local container_executor = require("devcontainer.internal.container_executor")
-local container_runtime = require("devcontainer.container")
+local cli = require("devcontainer.cli")
+local installer = require("devcontainer.internal.installer")
+
+---Wrap callback to run in main event loop (avoids E5560 in fast callbacks)
+---@param fn function
+---@return function
+local function sched(fn)
+  return vim.schedule_wrap(fn)
+end
+
+---Shell snippet that ensures nvim is available, either at the installer-managed
+---path or on PATH.
+local function probe_cmd()
+  local dir = config.nvim_install_dir or "$HOME/.nvim-devcontainer"
+  return '("' .. dir .. '/bin/nvim" --version >/dev/null 2>&1 || nvim --version >/dev/null 2>&1)'
+end
+
+---Check if Neovim is available in the container (either at the installer path
+---or on PATH).
+---@param container_id string
+---@param opts? table
+---@field on_success? fun()
+---@field on_fail? fun()
+function M.is_installed(container_id, opts)
+  opts = opts or {}
+  v.validate_callbacks(opts)
+
+  cli.exec(container_id, "/bin/sh", { "-c", probe_cmd() }, {
+    on_exit = sched(function(result)
+      if result.code == 0 then
+        opts.on_success()
+      else
+        opts.on_fail()
+      end
+    end),
+  })
+end
 
 ---@class AddNeovimOpts
----@field on_success? function() success callback
----@field on_step? function(step) step success callback
----@field on_fail? function() failure callback
----@field version? string version of neovim to use - current version by default
----@field install_as_root? boolean can be set to true to run installation as root
+---@field on_success? fun()
+---@field on_fail? fun(err: string?)
+---@field nvim_attr? string override the Nix flake attribute for nvim
 
----Adds neovim to passed container using exec
----@param container_id string id of container to add neovim to
----@param opts? AddNeovimOpts Additional options including callbacks
+---Install Neovim into the container using the Nix bundle installer.
+---Thin wrapper kept for API compatibility with the commands module.
+---@param container_id string
+---@param opts? AddNeovimOpts
 function M.add_neovim(container_id, opts)
   vim.validate("container_id", container_id, "string")
   vim.validate("opts", opts, { "table", "nil" })
   opts = opts or {}
-  v.validate_callbacks(opts)
-  v.validate_opts(opts, { version = "string", install_as_root = "boolean" })
-  opts.on_success = opts.on_success
-    or function()
-      vim.notify("Successfully added neovim to container (" .. container_id .. ")")
-    end
-  opts.on_fail = opts.on_fail
-    or function()
-      vim.notify("Adding neovim to container (" .. container_id .. ") has failed!", vim.log.levels.ERROR)
-    end
-  opts.on_step = opts.on_step
-    or function(step)
-      vim.notify("Executed " .. table.concat(step, " ") .. " on container (" .. container_id .. ")!")
-    end
-
-  local function run_commands(commands)
-    local build_status = {
-      build_title = "Adding neovim to: " .. container_id,
-      progress = 0,
-      step_count = #commands,
-      current_step = 0,
-      image_id = nil,
-      source_dockerfile = nil,
-      build_command = "nvim.add_neovim",
-      commands_run = {},
-      running = true,
-    }
-    local current_step = 0
-    status.add_build(build_status)
-    local exec_args = nil
-    if opts.install_as_root then
-      exec_args = { "-u", "0" }
-    end
-
-    container_executor.run_all_seq(container_id, commands, {
-      on_success = function()
-        build_status.running = false
-        vim.api.nvim_exec_autocmds("User", { pattern = "DevcontainerBuildProgress", modeline = false })
-        if config.cache_images then
-          local tag = u.get_image_cache_tag()
-          container_runtime.container_commit(container_id, {
-            tag = tag,
-          })
-        end
-        opts.on_success()
-      end,
-      on_step = function(step)
-        current_step = current_step + 1
-        build_status.current_step = current_step
-        build_status.progress = math.floor((build_status.current_step / build_status.step_count) * 100)
-        vim.api.nvim_exec_autocmds("User", { pattern = "DevcontainerBuildProgress", modeline = false })
-        opts.on_step(step)
-      end,
-      on_fail = opts.on_fail,
-      exec_args = exec_args,
-    })
-  end
-
-  local version_string = opts.version
-  if not version_string then
-    local version = vim.version()
-    version_string = "v" .. version.major .. "." .. version.minor .. "." .. version.patch
-  end
-  container_runtime.exec(container_id, {
-    command = { "compgen", "-c" },
-    on_success = function(result)
-      local available_commands = {}
-      if result then
-        local result_lines = vim.split(result, "\n")
-        for _, line in ipairs(result_lines) do
-          if v then
-            table.insert(available_commands, line)
-          end
-        end
-      end
-      local commands = config.nvim_installation_commands_provider(available_commands, version_string)
-      run_commands(commands)
+  installer.install(container_id, {
+    nvim_attr = opts.nvim_attr,
+    on_success = opts.on_success or function()
+      vim.notify("Successfully installed Neovim into container (" .. container_id .. ")")
     end,
-    on_fail = function()
-      local commands = config.nvim_installation_commands_provider({}, version_string)
-      run_commands(commands)
+    on_fail = opts.on_fail or function(err)
+      vim.notify(
+        "Installing Neovim into container (" .. container_id .. ") failed: " .. (err or "unknown"),
+        vim.log.levels.ERROR
+      )
     end,
   })
 end

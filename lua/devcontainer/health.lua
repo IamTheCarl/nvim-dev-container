@@ -3,94 +3,88 @@ local function vim_version_string()
   return v.major .. "." .. v.minor .. "." .. v.patch
 end
 
-local config = require("devcontainer.config")
 local executor = require("devcontainer.internal.executor")
+local cli = require("devcontainer.cli")
 
 return {
   check = function()
+    local cli_path = require("devcontainer.config").cli_path or "devcontainer (on PATH)"
+
     vim.health.start("Neovim version")
 
     if vim.fn.has("nvim-0.12") == 0 then
-      vim.health.warn("Latest Neovim version (0.12+) is required for improved attach command!")
-    end
-    if vim.fn.has("nvim-0.11") == 0 then
-      vim.health.warn("Latest Neovim version is recommended for full feature set!")
+      vim.health.warn(
+        "Neovim 0.12+ is recommended for the :connect-based attach command!\n"
+          .. "You can still use the plugin but will get a TTY terminal instead of full Neovim embedding."
+      )
     else
-      vim.health.ok("Neovim version tested and supported: " .. vim_version_string())
+      vim.health.ok("Neovim version: " .. vim_version_string())
     end
 
-    vim.health.start("Required plugins")
+    vim.health.start("devcontainer CLI")
 
-    local has_json, json_info = pcall(vim.treesitter.language.inspect, "json")
-
-    if not has_json then
-      vim.health.error("Json treesitter parser missing! devcontainer.json files parsing will fail!")
-    else
-      vim.health.ok("Json treesitter parser available. ABI version: " .. json_info.abi_version)
-    end
-
-    vim.health.start("External dependencies")
-
-    if config.container_runtime ~= nil then
-      if executor.is_executable(config.container_runtime) then
-        local handle = io.popen(config.container_runtime .. " --version")
-        if handle ~= nil then
-          local version = handle:read("*a")
-          handle:close()
-          vim.health.ok(version)
-        end
+    if cli.is_available() then
+      local handle = io.popen((cli_path ~= "devcontainer (on PATH)" and cli_path or "devcontainer") .. " --version 2>&1")
+      if handle then
+        local version = handle:read("*a")
+        handle:close()
+        vim.health.ok("devcontainer CLI available (" .. cli_path .. "): " .. version:gsub("%s+", " "))
       else
-        vim.health.error(config.container_runtime .. " is not executable. Make sure it is installed!")
+        vim.health.warn("devcontainer CLI found at " .. cli_path .. " but --version failed")
       end
     else
-      local runtimes = { "podman", "docker" }
-      local has_any = false
-      for _, executable in ipairs(runtimes) do
-        if executor.is_executable(executable) then
-          has_any = true
-          local handle = io.popen(executable .. " --version")
-          if handle ~= nil then
-            local version = handle:read("*a")
-            handle:close()
-            vim.health.ok("Found " .. executable .. ": " .. version)
-          end
-        end
+      vim.health.error(
+        "devcontainer CLI not found at " .. cli_path .. "!\n"
+          .. "Install it with: npm install -g @devcontainers/cli\n"
+          .. "Or set cli_path in setup: require('devcontainer').setup{ cli_path = '/path/to/devcontainer' }\n"
+          .. "See: https://github.com/devcontainers/cli"
+      )
+    end
+
+    vim.health.start("Container runtime (Docker/Podman)")
+
+    local config = require("devcontainer.config")
+    local docker_cmd = config.docker_command or "docker"
+    local has_docker = executor.is_executable(docker_cmd)
+    local has_podman = executor.is_executable("podman")
+
+    if has_docker then
+      local handle = io.popen(docker_cmd .. " --version 2>&1")
+      if handle then
+        local version = handle:read("*a")
+        handle:close()
+        vim.health.ok(docker_cmd .. " available: " .. version:gsub("%s+", " "))
       end
-      if not has_any then
-        vim.health.error("No container runtime is available! Install either podman or docker!")
+    else
+      vim.health.error(
+        docker_cmd .. " not found on PATH.\n"
+          .. "The installer streams the Neovim bundle via `" .. docker_cmd .. " exec -i`."
+      )
+    end
+
+    if has_podman then
+      local handle = io.popen("podman --version 2>&1")
+      if handle then
+        local version = handle:read("*a")
+        handle:close()
+        vim.health.ok("Podman available: " .. version:gsub("%s+", " "))
       end
     end
 
-    if config.compose_command ~= nil then
-      if executor.is_executable(config.compose_command) then
-        local handle = io.popen(config.compose_command .. " --version")
-        if handle ~= nil then
-          local version = handle:read("*a")
-          handle:close()
-          vim.health.ok(version)
-        end
-      else
-        vim.health.error(
-          config.compose_command .. " is not executable! It is required for full functionality of this plugin!"
-        )
+    vim.health.start("Nix (for Neovim bundle install)")
+    if executor.is_executable("nix") then
+      local handle = io.popen("nix --version 2>&1")
+      if handle then
+        local version = handle:read("*a")
+        handle:close()
+        vim.health.ok("nix available: " .. version:gsub("%s+", " "))
       end
     else
-      local compose_runtimes = { "podman-compose", "docker-compose", "docker compose" }
-      local has_any = false
-      for _, executable in ipairs(compose_runtimes) do
-        if executor.is_executable(executable) then
-          has_any = true
-          local handle = io.popen(executable .. " --version")
-          if handle ~= nil then
-            local version = handle:read("*a")
-            handle:close()
-            vim.health.ok("Found " .. executable .. ": " .. version)
-          end
-        end
-      end
-      if not has_any then
-        vim.health.error("No compose tool is available! Install either podman-compose or docker-compose!")
-      end
+      vim.health.error(
+        "nix not found on PATH.\n"
+          .. "Required to build the Neovim bundle that is streamed into the container.\n"
+          .. "Install Nix: https://nixos.org/download"
+      )
     end
   end,
 }

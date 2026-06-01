@@ -44,57 +44,12 @@ local function default_terminal_handler(command)
 end
 
 local function workspace_folder_provider()
-  return vim.lsp.buf.list_workspace_folders()[1] or vim.loop.cwd()
+  local folders = vim.lsp.buf.list_workspace_folders()
+  return folders[1] or vim.loop.cwd()
 end
 
-local function default_config_search_start()
+local function config_search_start()
   return vim.loop.cwd()
-end
-
-local function default_nvim_installation_commands_provider(_, version_string)
-  return {
-    {
-      "apt-get",
-      "update",
-    },
-    {
-      "apt-get",
-      "-y",
-      "install",
-      "curl",
-      "fzf",
-      "ripgrep",
-      "tree",
-      "git",
-      "xclip",
-      "python3",
-      "python3-pip",
-      "python3-pynvim",
-      "nodejs",
-      "npm",
-      "tzdata",
-      "ninja-build",
-      "gettext",
-      "libtool",
-      "libtool-bin",
-      "autoconf",
-      "automake",
-      "cmake",
-      "g++",
-      "pkg-config",
-      "zip",
-      "unzip",
-    },
-    { "npm", "i", "-g", "neovim" },
-    { "mkdir", "-p", "/root/TMP" },
-    { "sh", "-c", "cd /root/TMP && git clone https://github.com/neovim/neovim" },
-    {
-      "sh",
-      "-c",
-      "cd /root/TMP/neovim && (git checkout " .. version_string .. " || true) && make -j4 && make install",
-    },
-    { "rm", "-rf", "/root/TMP" },
-  }
 end
 
 local function default_devcontainer_json_template()
@@ -107,7 +62,7 @@ local function default_devcontainer_json_template()
     [[// "build": {]],
     [[//     "dockerfile": "Dockerfile",]],
     [[// [Optional] You can use build args to set options. e.g. 'VARIANT' below affects the image in the Dockerfile]],
-    [[//     "args": { "VARIANT: "buster" },]],
+    [[//     "args": { "VARIANT": "buster" },]],
     [[// }]],
     [[// Or use docker-compose]],
     [[// Update the 'dockerComposeFile' list if you have more compose files or use different names.]],
@@ -123,7 +78,7 @@ local function default_devcontainer_json_template()
   }
 end
 
----Handles terminal requests (mainly used for attaching to container)
+---@Handles terminal requests (mainly used for attaching to container)
 ---By default it uses terminal command
 ---@type function
 M.terminal_handler = default_terminal_handler
@@ -137,7 +92,7 @@ M.workspace_folder_provider = workspace_folder_provider
 ---After this search moves up until root
 ---By default it uses vim.loop.cwd()
 ---@type function
-M.config_search_start = default_config_search_start
+M.config_search_start = config_search_start
 
 ---Flag to disable recursive search for .devcontainer config files
 ---By default plugin will move up to root looking for .devcontainer files
@@ -150,43 +105,34 @@ M.disable_recursive_config_search = false
 ---@type boolean
 M.cache_images = true
 
----Provides commands for adding neovim to container
----This function should return a table listing commands to run - each command should eitehr be a table or a string
----It takes a list of executables available in the container, to decide
----which package manager to use and also version string with current neovim version
----@type function
-M.nvim_installation_commands_provider = default_nvim_installation_commands_provider
-
----Can be set to true to install neovim as root
----This is usually not required,
----but if default container user can't run commands defined in M.nvim_installation_commands_provider this is required
----@type boolean
-M.nvim_install_as_root = false
-
 ---Provides template for creating new .devcontainer.json files
 ---This function should return a table listing lines of the file
 ---@type function
 M.devcontainer_json_template = default_devcontainer_json_template
 
----Used to set current container runtime
----By default plugin will try to use "docker" or "podman"
----@type string?
-M.container_runtime = nil
+---Nix flake attribute used to build the Neovim bundle that is installed
+---into the container. Defaults to `nixpkgs#neovim`. Override to bundle
+---your own Neovim derivation (e.g. a flake containing your full config):
+---  require("devcontainer").setup({ nvim_nix_attribute = "github:me/dotfiles#nvim" })
+---Raw `/nix/store/...` paths are not accepted by `nix bundle`; use a
+---flake reference.
+---@type string|nil
+M.nvim_nix_attribute = nil
 
----Used to set backup runtime when main runtime does not support a command
----By default plugin will try to use "docker" or "podman"
----@type string?
-M.backup_runtime = nil
+---Directory inside the container where the streamed Neovim is installed.
+---The binary lands at `<nvim_install_dir>/bin/nvim`. The value is passed
+---verbatim to the container shell, so `$HOME` expansion works.
+---@type string
+M.nvim_install_dir = "$HOME/.nvim-devcontainer"
 
----Used to set current compose command
----By default plugin will try to use "docker-compose" or "podman-compose"
----@type string?
-M.compose_command = nil
+---Maximum number of Nix bundles to retain in the host cache. Older
+---bundles (by mtime) are pruned after a successful install.
+---@type integer
+M.nvim_cache_versions = 3
 
----Used to set backup command when main command does not support a command
----By default plugin will try to use "docker-compose" or "podman-compose"
----@type string?
-M.backup_compose_command = nil
+---Name of the docker executable on PATH. Override for podman, etc.
+---@type string
+M.docker_command = "docker"
 
 ---@class MountOpts
 ---@field enabled boolean if true this mount is enabled
@@ -246,5 +192,11 @@ M.container_env = {}
 ---NOTE: This supports "${containerEnv:VAR_NAME}" syntax to use variables from container
 ---@type table[string, string]
 M.remote_env = {}
+
+---Path to the devcontainer CLI executable.
+---If not set, the plugin will search for 'devcontainer' on PATH.
+---Useful when the CLI is installed via Nix and not on PATH.
+---@type string|nil
+M.cli_path = nil
 
 return M

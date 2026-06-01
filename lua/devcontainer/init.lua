@@ -7,17 +7,13 @@ local M = {}
 local config = require("devcontainer.config")
 local commands = require("devcontainer.commands")
 local log = require("devcontainer.internal.log")
-local parse = require("devcontainer.config_file.parse")
 local v = require("devcontainer.internal.validation")
-local executor = require("devcontainer.internal.executor")
-local runtime = require("devcontainer.internal.runtimes")
-local cmdline = require("devcontainer.internal.cmdline")
 
 local configured = false
 
 ---@class DevcontainerAutocommandOpts
----@field init? boolean|string set to true (or "ask" to prompt before stating) to enable automatic devcontainer start
----@field clean? boolean set to true to enable automatic devcontainer stop and clean
+---@field init? boolean|string set to true (or "ask" to prompt before starting) to enable automatic devcontainer start
+---@field clean? boolean set to true to enable automatic devcontainer stop and clean on VimLeavePre
 ---@field update? boolean set to true to enable automatic devcontainer update when config file is changed
 
 ---@class DevcontainerSetupOpts
@@ -25,8 +21,10 @@ local configured = false
 ---@field workspace_folder_provider? function provides current workspace folder
 ---@field terminal_handler? function handles terminal command requests, useful for floating terminals and similar
 ---@field devcontainer_json_template? function provides template for new .devcontainer.json files - returns table
----@field nvim_installation_commands_provider? function provides table of commands for installing neovim in container
----@field nvim_install_as_root? boolean can be set to true to install neovim as root in container - usually not required
+---@field nvim_nix_attribute? string Nix flake attribute used to bundle Neovim for the container (default `nixpkgs#neovim`)
+---@field nvim_install_dir? string Install directory inside the container (default `$HOME/.nvim-devcontainer`)
+---@field nvim_cache_versions? integer Number of cached Nix bundles to retain on host (default 3)
+---@field docker_command? string Name of the docker binary on PATH (default `docker`)
 ---@field generate_commands? boolean can be set to false to prevent plugin from creating commands (true by default)
 ---@field autocommands? DevcontainerAutocommandOpts can be set to enable autocommands, disabled by default
 ---@field log_level? LogLevel can be used to override library logging level
@@ -36,10 +34,7 @@ local configured = false
 ---@field cache_images? boolean can be used to cache images after adding neovim - true by default
 ---@field attach_mounts? AttachMountsOpts can be used to configure mounts when adding neovim to containers
 ---@field always_mount? table[table|string] list of mounts to add to every container
----@field container_runtime? string container runtime to use ("docker", "podman", "devcontainer-cli")
----@field backup_runtime? string container runtime to use when main does not support an action ("docker", "podman")
----@field compose_command? string command to use for compose
----@field backup_compose_command? string command to use for compose when main does not support an action
+---@field cli_path? string path to devcontainer CLI executable (useful for Nix installations)
 
 ---Starts the plugin and sets it up with provided options
 ---@param opts? DevcontainerSetupOpts
@@ -56,8 +51,18 @@ function M.setup(opts)
     workspace_folder_provider = "function",
     terminal_handler = "function",
     devcontainer_json_template = "function",
-    nvim_installation_commands_provider = "function",
-    nvim_install_as_root = "boolean",
+    nvim_nix_attribute = function(t)
+      return t == nil or type(t) == "string"
+    end,
+    nvim_install_dir = function(t)
+      return t == nil or type(t) == "string"
+    end,
+    nvim_cache_versions = function(t)
+      return t == nil or type(t) == "number"
+    end,
+    docker_command = function(t)
+      return t == nil or type(t) == "string"
+    end,
     generate_commands = "boolean",
     autocommands = "table",
     log_level = "string",
@@ -69,7 +74,11 @@ function M.setup(opts)
     always_mount = function(t)
       return t == nil or vim.islist(t)
     end,
+    cli_path = function(t)
+      return t == nil or type(t) == "string"
+    end,
   })
+
   if opts.autocommands then
     v.validate_deep(opts.autocommands, "opts.autocommands", {
       init = { "boolean", "string" },
@@ -77,6 +86,7 @@ function M.setup(opts)
       update = "boolean",
     })
   end
+
   local am = opts.attach_mounts
   if am then
     v.validate_deep(am, "opts.attach_mounts", {
@@ -109,9 +119,10 @@ function M.setup(opts)
 
   config.terminal_handler = opts.terminal_handler or config.terminal_handler
   config.devcontainer_json_template = opts.devcontainer_json_template or config.devcontainer_json_template
-  config.nvim_installation_commands_provider = opts.nvim_installation_commands_provider
-    or config.nvim_installation_commands_provider
-  config.nvim_install_as_root = opts.nvim_install_as_root or config.nvim_install_as_root
+  config.nvim_nix_attribute = opts.nvim_nix_attribute or config.nvim_nix_attribute
+  config.nvim_install_dir = opts.nvim_install_dir or config.nvim_install_dir
+  config.nvim_cache_versions = opts.nvim_cache_versions or config.nvim_cache_versions
+  config.docker_command = opts.docker_command or config.docker_command
   config.workspace_folder_provider = opts.workspace_folder_provider or config.workspace_folder_provider
   config.config_search_start = opts.config_search_start or config.config_search_start
   config.always_mount = opts.always_mount or config.always_mount
@@ -128,138 +139,73 @@ function M.setup(opts)
   end
   config.container_env = opts.container_env or config.container_env
   config.remote_env = opts.remote_env or config.remote_env
-  config.container_runtime = opts.container_runtime or config.container_runtime
-  config.backup_runtime = opts.backup_runtime or config.backup_runtime
-  config.compose_command = opts.compose_command or config.compose_command
-  config.backup_compose_command = opts.backup_compose_command or config.backup_compose_command
 
-  if config.compose_command == nil then
-    if executor.is_executable("podman-compose") then
-      config.compose_command = "podman-compose"
-    elseif executor.is_executable("docker-compose") then
-      config.compose_command = "docker-compose"
-    elseif executor.is_executable("docker compose") then
-      config.compose_command = "docker compose"
-    end
-  end
-
-  if config.backup_compose_command == nil then
-    if executor.is_executable("podman-compose") then
-      config.backup_compose_command = "podman-compose"
-    elseif executor.is_executable("docker-compose") then
-      config.backup_compose_command = "docker-compose"
-    elseif executor.is_executable("docker compose") then
-      config.backup_compose_command = "docker compose"
-    end
-  end
-
-  if config.container_runtime == nil then
-    if executor.is_executable("podman") then
-      config.container_runtime = "podman"
-    elseif executor.is_executable("docker") then
-      config.container_runtime = "docker"
-    end
-  end
-
-  if config.backup_runtime == nil then
-    if executor.is_executable("podman") then
-      config.backup_runtime = "podman"
-    elseif executor.is_executable("docker") then
-      config.backup_runtime = "docker"
-    end
+  if opts.cli_path then
+    config.cli_path = opts.cli_path
+    log.info("Using devcontainer CLI from: " .. opts.cli_path)
   end
 
   if opts.generate_commands ~= false then
-    local container_command_complete = cmdline.complete_parse(function(cmdline_status)
-      local command_suggestions = { "nvim", "sh" }
-      -- Filling second arg
-      if cmdline_status.current_arg == 2 then
-        return command_suggestions
-      elseif cmdline_status.current_arg == 1 then
-        local options = { "devcontainer", "latest" }
-        local containers = runtime.container.container_ls({ async = false })
-        vim.list_extend(options, containers)
-
-        if cmdline_status.arg_count == 1 then
-          vim.list_extend(options, command_suggestions)
-        end
-        return options
-      end
-      return {}
-    end)
-
-    -- Automatic
-    vim.api.nvim_create_user_command("DevcontainerStart", function(_)
-      commands.start_auto()
-    end, {
-      nargs = 0,
-      desc = "Start either compose, dockerfile or image from .devcontainer.json",
-    })
     vim.api.nvim_create_user_command("DevcontainerAttach", function(args)
-      local target = "devcontainer"
-      local command = "nvim"
-      if #args.fargs == 1 then
-        command = args.fargs[1]
-      elseif #args.fargs > 1 then
-        target = args.fargs[1]
-        command = args.fargs
-        table.remove(command, 1)
+      local cmd = "nvim"
+      if #args.fargs > 0 then
+        cmd = table.concat(args.fargs, " ")
       end
-      commands.attach_auto(target, command)
+      commands.attach({ command = cmd })
     end, {
       nargs = "*",
-      desc = "Attach to either compose, dockerfile or image from .devcontainer.json",
-      complete = container_command_complete,
+      desc = "Attach to devcontainer using devcontainer CLI",
     })
-    vim.api.nvim_create_user_command("DevcontainerExec", function(args)
-      local target = "devcontainer"
-      local command = "nvim"
-      if #args.fargs == 1 then
-        command = args.fargs[1]
-      elseif #args.fargs > 1 then
-        target = args.fargs[1]
-        command = args.fargs
-        table.remove(command, 1)
-      end
-      commands.exec(target, command)
-    end, {
-      nargs = "*",
-      desc = "Execute a command on running container",
-      complete = container_command_complete,
-    })
+
     vim.api.nvim_create_user_command("DevcontainerStop", function(_)
-      commands.stop_auto()
+      commands.stop()
     end, {
       nargs = 0,
-      desc = "Stop either compose, dockerfile or image from .devcontainer.json",
+      desc = "Stop the devcontainer",
     })
 
-    -- Cleanup
-    vim.api.nvim_create_user_command("DevcontainerStopAll", function(_)
-      commands.stop_all()
+    vim.api.nvim_create_user_command("DevcontainerExec", function(args)
+      if #args.fargs == 0 then
+        vim.notify("Usage: DevcontainerExec <command> [args...]", vim.log.levels.WARN)
+        return
+      end
+      commands.exec(args.fargs)
     end, {
-      nargs = 0,
-      desc = "Stop everything started with devcontainer",
-    })
-    vim.api.nvim_create_user_command("DevcontainerRemoveAll", function(_)
-      commands.remove_all()
-    end, {
-      nargs = 0,
-      desc = "Remove everything started with devcontainer",
+      nargs = "*",
+      desc = "Execute a command in the running devcontainer",
     })
 
-    -- Util
     vim.api.nvim_create_user_command("DevcontainerLogs", function(_)
       commands.open_logs()
     end, {
       nargs = 0,
       desc = "Open devcontainer plugin logs in a new buffer",
     })
+
     vim.api.nvim_create_user_command("DevcontainerEditNearestConfig", function(_)
-      commands.edit_devcontainer_config()
+      commands.edit_config()
     end, {
       nargs = 0,
-      desc = "Opens nearest devcontainer.json file in a new buffer or creates one if it does not exist",
+      desc = "Open or create nearest devcontainer.json file",
+    })
+
+    vim.api.nvim_create_user_command("DevcontainerAddNeovim", function(_)
+      commands.add_neovim()
+    end, {
+      nargs = 0,
+      desc = "Add Neovim to the running devcontainer",
+    })
+
+    vim.api.nvim_create_user_command("DevcontainerClearCache", function(_)
+      vim.ui.select({ "Yes", "No" }, { prompt = "Clear Nix bundle cache?" }, function(choice)
+        if choice == "Yes" then
+          require("devcontainer.internal.installer").clear_cache()
+          vim.notify("Nix bundle cache cleared.")
+        end
+      end)
+    end, {
+      nargs = 0,
+      desc = "Clear the Nix bundle cache used by the Neovim installer",
     })
   end
 
@@ -270,27 +216,52 @@ function M.setup(opts)
       local last_devcontainer_file = nil
 
       local function auto_start()
-        parse.find_nearest_devcontainer_config(vim.schedule_wrap(function(err, data)
-          if err == nil and data ~= nil then
-            if vim.loop.fs_realpath(data) ~= last_devcontainer_file then
-              if opts.autocommands.init == "ask" then
-                vim.ui.select(
-                  { "Yes", "No" },
-                  { prompt = "Devcontainer file found! Would you like to start the container?" },
-                  function(choice)
-                    if choice == "Yes" then
-                      commands.start_auto()
-                      last_devcontainer_file = vim.loop.fs_realpath(data)
-                    end
-                  end
-                )
-              else
-                commands.start_auto()
-                last_devcontainer_file = vim.loop.fs_realpath(data)
+        local find_nearest = function(start_path, callback)
+          local uv = vim.loop
+          local current = vim.fn.fnamemodify(start_path or uv.cwd(), ":p")
+
+          while current and current ~= "" do
+            local possible_paths = {
+              current .. "/.devcontainer/devcontainer.json",
+              current .. "/.devcontainer.json",
+            }
+
+            for _, path in ipairs(possible_paths) do
+              local handle = uv.fs_stat(path)
+              if handle and handle.type == "file" then
+                callback(path)
+                return
               end
             end
+
+            local parent = current:match("^(.+)/[^/]+/$") or current:match("^(.+)/[^/]+$")
+            if not parent or parent == current then
+              break
+            end
+            current = parent
           end
-        end))
+
+          callback(nil)
+        end
+
+        find_nearest(config.config_search_start(), function(path)
+          if path and path ~= last_devcontainer_file then
+            last_devcontainer_file = path
+            if opts.autocommands.init == "ask" then
+              vim.ui.select(
+                { "Yes", "No" },
+                { prompt = "Devcontainer file found! Start container?" },
+                function(choice)
+                  if choice == "Yes" then
+                    commands.attach()
+                  end
+                end
+              )
+            else
+              commands.attach()
+            end
+          end
+        end)
       end
 
       vim.api.nvim_create_autocmd("BufEnter", {
@@ -316,7 +287,7 @@ function M.setup(opts)
         pattern = "*",
         group = au_id,
         callback = function()
-          commands.remove_all()
+          commands.stop()
         end,
       })
     end
@@ -326,13 +297,39 @@ function M.setup(opts)
         pattern = "*devcontainer.json",
         group = au_id,
         callback = function(event)
-          parse.find_nearest_devcontainer_config(function(err, data)
-            if err == nil and data ~= nil then
-              if data == event.match then
-                commands.stop_auto(function()
-                  commands.start_auto()
-                end)
+          local find_nearest = function(start_path, callback)
+            local uv = vim.loop
+            local current = vim.fn.fnamemodify(start_path or uv.cwd(), ":p")
+
+            while current and current ~= "" do
+              local possible_paths = {
+                current .. "/.devcontainer/devcontainer.json",
+                current .. "/.devcontainer.json",
+              }
+
+              for _, path in ipairs(possible_paths) do
+                local handle = uv.fs_stat(path)
+                if handle and handle.type == "file" then
+                  callback(path)
+                  return
+                end
               end
+
+              local parent = current:match("^(.+)/[^/]+/$") or current:match("^(.+)/[^/]+$")
+              if not parent or parent == current then
+                break
+              end
+              current = parent
+            end
+
+            callback(nil)
+          end
+
+          find_nearest(config.config_search_start(), function(path)
+            if path and path == event.match then
+              commands.stop(function()
+                commands.attach()
+              end)
             end
           end)
         end,
