@@ -211,8 +211,13 @@ local function attach_to_container(container_id, config_path, config, command, o
       -- Launch headless nvim in the container, bound to 0.0.0.0:<port>.
       -- Reachable from the host via the container's docker-bridge IP.
       -- No authentication; acceptable for local-dev usage only.
-      local launch_script = 'export PATH="' .. install_dir .. '/bin:$PATH"; '
-        .. "nohup nvim --headless --listen 0.0.0.0:" .. tostring(port)
+      --
+      -- AppRun sets VIMRUNTIME / LD_LIBRARY_PATH and execs nvim directly
+      -- (no user-namespace chroot), so child processes spawned by :terminal,
+      -- :!cmd, and LSP servers can reach the container's native /usr/bin,
+      -- /bin, /lib, etc. — i.e. normal devcontainer semantics.
+      local launch_script = "nohup " .. install_dir .. "/app/AppRun --headless"
+        .. " --listen 0.0.0.0:" .. tostring(port)
         .. " >/dev/null 2>&1 &"
       cli.exec(container_id, "/bin/sh", { "-c", launch_script }, {
         remote_env = remote_env,

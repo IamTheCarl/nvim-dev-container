@@ -2,8 +2,9 @@
 ---@brief [[
 ---Provides high level commands related to using Neovim inside a container.
 ---Installation is delegated to `devcontainer.internal.installer`, which
----uses `nix bundle` + `docker exec -i` to stream a self-contained Neovim
----into the container at `$HOME/.nvim-devcontainer/bin/nvim`.
+---uses `nix bundle --bundler toAppImage` + `docker exec -i` to stream a
+---self-contained Neovim AppImage into the container and extract it at
+---`$HOME/.nvim-devcontainer/app/` (AppRun launcher inside).
 ---@brief ]]
 
 local M = {}
@@ -21,15 +22,14 @@ local function sched(fn)
   return vim.schedule_wrap(fn)
 end
 
----Shell snippet that ensures nvim is available, either at the installer-managed
----path or on PATH.
+---Shell snippet that ensures the bundled nvim AppImage is extracted and
+---runnable at the installer-managed path.
 local function probe_cmd()
   local dir = config.nvim_install_dir or "$HOME/.nvim-devcontainer"
-  return '("' .. dir .. '/bin/nvim" --version >/dev/null 2>&1 || nvim --version >/dev/null 2>&1)'
+  return '"' .. dir .. '/app/AppRun" --version >/dev/null 2>&1'
 end
 
----Check if Neovim is available in the container (either at the installer path
----or on PATH).
+---Check if Neovim is available in the container at the installer path.
 ---@param container_id string
 ---@param opts? table
 ---@field on_success? fun()

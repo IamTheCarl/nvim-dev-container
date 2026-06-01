@@ -1,9 +1,14 @@
 ---@mod devcontainer.internal.installer Nix-based Neovim installer
 ---@brief [[
 ---Bundles the user's Neovim (or a user-specified flake attribute) using
----`nix bundle` with the toArx bundler, caches the resulting self-extracting
----archive on the host, and streams it into the target container via
----`docker exec -i`. No root or sudo required inside the container.
+---`nix bundle` with the toAppImage bundler, caches the resulting AppImage on
+---the host, streams it into the target container via `docker exec -i`, and
+---extracts it in-place. No root or sudo required inside the container.
+---
+---The AppImage runtime sets VIMRUNTIME / LD_LIBRARY_PATH and execs nvim
+---directly — no chroot, no user-namespace re-rooting — so :terminal, :!cmd,
+---and LSP-spawned processes can reach arbitrary host binaries in the
+---container's filesystem.
 ---@brief ]]
 
 local M = {}
@@ -22,7 +27,8 @@ end
 ---Return the host cache directory for bundles.
 ---@return string
 local function cache_dir()
-  local dir = vim.fn.stdpath("cache") .. "/nvim-dev-container/nix"
+  -- Bundler-namespaced dir so older toArx artifacts can't be served by mistake.
+  local dir = vim.fn.stdpath("cache") .. "/nvim-dev-container/appimage"
   vim.fn.mkdir(dir, "p")
   return dir
 end
@@ -64,7 +70,7 @@ local function eval_out_path(attr)
   return out, nil
 end
 
----Ensure a bundled arx archive exists on disk for the given attribute.
+---Ensure a bundled AppImage exists on disk for the given attribute.
 ---@param attr string nix flake attribute (e.g. "nixpkgs#neovim")
 ---@param cb fun(bundle_path: string?, err: string?)
 function M.ensure_nix_bundle(attr, cb)
@@ -75,11 +81,11 @@ function M.ensure_nix_bundle(attr, cb)
     return cb(bundle_path, nil)
   end
 
-  vim.notify("Building Nix bundle for " .. attr .. " — this may take a few minutes...", vim.log.levels.INFO)
+  vim.notify("Building Nix AppImage for " .. attr .. " — this may take a few minutes...", vim.log.levels.INFO)
 
   local cmd = {
     "nix", "bundle",
-    "--bundler", "github:NixOS/bundlers#toArx",
+    "--bundler", "github:NixOS/bundlers#toAppImage",
     "--out-link", bundle_path,
     attr,
   }
@@ -87,7 +93,8 @@ function M.ensure_nix_bundle(attr, cb)
     if res.code ~= 0 then
       return cb(nil, "nix bundle failed: " .. (res.stderr or "unknown"))
     end
-    -- `nix bundle --out-link` creates a symlink; the arx blob is what we want to stream.
+    -- `nix bundle --out-link` creates a symlink; resolve to the underlying
+    -- AppImage in the nix store.
     local real = vim.fn.resolve(bundle_path)
     if vim.fn.filereadable(real) ~= 1 then
       return cb(nil, "bundle artifact missing at " .. real)
@@ -96,44 +103,60 @@ function M.ensure_nix_bundle(attr, cb)
   end))
 end
 
----Read a file fully into a Lua string via libuv.
----@param path string
----@return string? data, string? err
-local function read_file_bytes(path)
-  local uv = vim.uv or vim.loop
-  local fd, oerr = uv.fs_open(path, "r", 438)
-  if not fd then return nil, oerr end
-  local stat, serr = uv.fs_fstat(fd)
-  if not stat then uv.fs_close(fd); return nil, serr end
-  local data, rerr = uv.fs_read(fd, stat.size, 0)
-  uv.fs_close(fd)
-  if not data then return nil, rerr end
-  return data, nil
-end
+---Chunk size for streaming the AppImage into the container. 1 MiB keeps
+---peak Lua heap bounded and yields ~80 schedule ticks for a typical bundle.
+local STREAM_CHUNK = 1024 * 1024
 
----Stream the bundle file into the container and place it at the install path.
----Bypasses devcontainer CLI; uses `docker exec -i` directly. Requires the
----container's shell to accept `cat` writing a binary stream from stdin.
+---Stream the AppImage into the container and extract it in-place.
+---Bypasses devcontainer CLI; uses `docker exec -i` directly. Wipes any
+---existing install dir first so leftovers from prior bundler formats can't
+---confuse the probe.
+---
+---Pumps the AppImage to `docker exec`'s stdin in fixed-size chunks so peak
+---Lua heap stays at one chunk regardless of bundle size. Yields via
+---`vim.schedule` between writes so the UI thread stays responsive.
+---
+---Resulting layout inside the container:
+---   $install_dir/app/AppRun           ← launcher (sets VIMRUNTIME etc.)
+---   $install_dir/app/usr/bin/nvim     ← the binary itself
+---   $install_dir/app/usr/lib/...      ← bundled runtime libs
+---
 ---@param container_id string
----@param bundle_path string host filesystem path to the arx bundle
----@param binary_name string filename to install under `$install_dir/bin/`
+---@param bundle_path string host filesystem path to the AppImage
 ---@param cb fun(ok: boolean, err: string?)
-function M.stream_install(container_id, bundle_path, binary_name, cb)
-  local data, rerr = read_file_bytes(bundle_path)
-  if not data then
-    return cb(false, "failed to read bundle: " .. (rerr or "unknown"))
+---@param on_progress? fun(bytes_written: integer, total: integer)
+function M.stream_and_extract(container_id, bundle_path, cb, on_progress)
+  local uv = vim.uv or vim.loop
+  local fd, oerr = uv.fs_open(bundle_path, "r", 438)
+  if not fd then
+    return cb(false, "failed to open bundle: " .. (oerr or "unknown"))
   end
+  local stat, serr = uv.fs_fstat(fd)
+  if not stat then
+    uv.fs_close(fd)
+    return cb(false, "failed to stat bundle: " .. (serr or "unknown"))
+  end
+  local total = stat.size
 
   local install_dir = config.nvim_install_dir or "$HOME/.nvim-devcontainer"
   local docker = config.docker_command or "docker"
-  local script = 'set -e; '
-    .. 'mkdir -p "' .. install_dir .. '/bin"; '
-    .. 'cat > "' .. install_dir .. '/bin/' .. binary_name .. '"; '
-    .. 'chmod +x "' .. install_dir .. '/bin/' .. binary_name .. '"'
+  -- Stream the AppImage, extract its squashfs payload, then promote
+  -- squashfs-root → app and remove the now-redundant AppImage file.
+  local script = table.concat({
+    "set -e",
+    'rm -rf "' .. install_dir .. '"',
+    'mkdir -p "' .. install_dir .. '"',
+    'cat > "' .. install_dir .. '/nvim.AppImage"',
+    'chmod +x "' .. install_dir .. '/nvim.AppImage"',
+    'cd "' .. install_dir .. '"',
+    './nvim.AppImage --appimage-extract >/dev/null',
+    'mv squashfs-root app',
+    'rm -f "' .. install_dir .. '/nvim.AppImage"',
+  }, "; ")
 
-  vim.system(
+  local handle = vim.system(
     { docker, "exec", "-i", container_id, "sh", "-c", script },
-    { stdin = data, text = false },
+    { stdin = true, text = false },
     sched(function(res)
       if res.code ~= 0 then
         return cb(false, "docker exec failed: " .. (res.stderr or "unknown"))
@@ -141,6 +164,37 @@ function M.stream_install(container_id, bundle_path, binary_name, cb)
       cb(true, nil)
     end)
   )
+
+  local offset = 0
+  local done = false
+  local function cleanup()
+    if not done then
+      done = true
+      uv.fs_close(fd)
+    end
+  end
+
+  local pump
+  pump = function()
+    if done then return end
+    local data, rerr = uv.fs_read(fd, STREAM_CHUNK, offset)
+    if not data then
+      cleanup()
+      pcall(handle.kill, handle, "sigterm")
+      return cb(false, "failed to read bundle chunk: " .. (rerr or "unknown"))
+    end
+    if #data == 0 then
+      cleanup()
+      handle:write(nil) -- close stdin; on_exit will fire the user callback
+      return
+    end
+    handle:write(data)
+    offset = offset + #data
+    if on_progress then on_progress(offset, total) end
+    vim.schedule(pump)
+  end
+
+  pump()
 end
 
 ---@class InstallOpts
@@ -149,8 +203,9 @@ end
 ---@field nvim_attr? string override the Nix attribute for the nvim install
 
 ---Orchestrate the full installer pipeline.
----Bundles Neovim and streams it into the container as `bin/nvim`. Emits
----`User DevcontainerBuildProgress` autocmds for progress UI.
+---Bundles Neovim as an AppImage and extracts it into the container under
+---`<install_dir>/app/`. Emits `User DevcontainerBuildProgress` autocmds
+---for progress UI.
 ---@param container_id string
 ---@param opts? InstallOpts
 function M.install(container_id, opts)
@@ -172,7 +227,7 @@ function M.install(container_id, opts)
     build_command = "installer.install",
     commands_run = {
       "nix bundle " .. nvim_attr,
-      "docker exec stream nvim",
+      "docker exec stream + extract AppImage",
     },
     running = true,
   }
@@ -191,18 +246,28 @@ function M.install(container_id, opts)
     return on_fail(err)
   end
 
-  -- Step 1: bundle nvim
+  -- Step 1: bundle nvim as AppImage
   M.ensure_nix_bundle(nvim_attr, function(nvim_bundle, nerr)
     if not nvim_bundle then return finish(false, nerr) end
     build_status.current_step = 2
     build_status.progress = 50
     emit_progress()
 
-    -- Step 2: stream nvim into container
-    M.stream_install(container_id, nvim_bundle, "nvim", function(ok_n, sn_err)
+    -- Step 2: stream into container and extract. Per-chunk progress maps
+    -- the byte-pump range onto 50..99 so the status UI animates during the
+    -- network/disk-bound phase; 100 is reserved for post-extract success.
+    M.stream_and_extract(container_id, nvim_bundle, function(ok_n, sn_err)
       if not ok_n then return finish(false, sn_err) end
       finish(true, nil)
-    end)
+    end, sched(function(bytes_written, total)
+      if total > 0 then
+        local pct = 50 + math.floor((bytes_written / total) * 49)
+        if pct > build_status.progress then
+          build_status.progress = pct
+          emit_progress()
+        end
+      end
+    end))
   end)
 end
 

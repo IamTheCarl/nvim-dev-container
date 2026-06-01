@@ -120,7 +120,8 @@ M.devcontainer_json_template = default_devcontainer_json_template
 M.nvim_nix_attribute = nil
 
 ---Directory inside the container where the streamed Neovim is installed.
----The binary lands at `<nvim_install_dir>/bin/nvim`. The value is passed
+---The extracted AppImage lands at `<nvim_install_dir>/app/`, with the
+---launcher at `<nvim_install_dir>/app/AppRun`. The value is passed
 ---verbatim to the container shell, so `$HOME` expansion works.
 ---@type string
 M.nvim_install_dir = "$HOME/.nvim-devcontainer"
