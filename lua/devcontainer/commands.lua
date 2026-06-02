@@ -147,7 +147,12 @@ local function attach_to_container(container_id, config_path, config, command, o
       -- (no user-namespace chroot), so child processes spawned by :terminal,
       -- :!cmd, and LSP servers can reach the container's native /usr/bin,
       -- /bin, /lib, etc. — i.e. normal devcontainer semantics.
-      local launch_script = "nohup " .. install_dir .. "/app/AppRun --headless"
+      -- Change into the workspace directory before launching nvim so the
+      -- server's cwd matches the project root. Falls back to the image's
+      -- WORKDIR when workspaceFolder is not set in devcontainer.json.
+      local workspace_dir = config and config.workspaceFolder
+      local cd_prefix = workspace_dir and ("cd " .. vim.fn.shellescape(workspace_dir) .. " && ") or ""
+      local launch_script = cd_prefix .. "nohup " .. install_dir .. "/app/AppRun --headless"
         .. " --listen 0.0.0.0:" .. tostring(port)
         .. " >/dev/null 2>&1 &"
       cli.exec(container_id, "/bin/sh", { "-c", launch_script }, {
