@@ -386,7 +386,8 @@ function M.stop(opts)
   opts = opts or {}
 
   local function on_config_found(path, dir)
-    cli.recreate(dir or vim.loop.cwd(), {
+    local workspace_folder = dir and vim.fn.fnamemodify(dir, ":h") or vim.loop.cwd()
+    cli.recreate(workspace_folder, {
       config = path,
       on_exit = sched(function(result)
         if result.code == 0 then
