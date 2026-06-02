@@ -58,6 +58,52 @@ local function cache_key(attr)
   return string.sub(vim.fn.sha256(attr), 1, 16)
 end
 
+---Return the path to the SHA256 file for a given cache key.
+---@param key string
+---@return string
+local function hash_file_path(key)
+  return cache_dir() .. "/" .. key .. ".sha256"
+end
+
+---Compute the SHA256 of a file and store it next to the cache entry.
+---The hash is written as a plain 64-char hex string with no trailing newline.
+---Fails silently on error (leaves no hash file; treated as mismatch later).
+---@param real_path string resolved (non-symlink) path to the AppImage
+---@param key string cache key used to derive the hash file name
+local function compute_and_store_hash(real_path, key)
+  local res = vim.system({ "sha256sum", real_path }, { text = true }):wait()
+  if res.code ~= 0 or not res.stdout then return end
+  -- sha256sum output: "<hash>  <filename>\n"
+  local hash = vim.trim(vim.split(res.stdout, "%s+")[1] or "")
+  if #hash ~= 64 then return end
+  local path = hash_file_path(key)
+  local f = io.open(path, "w")
+  if not f then return end
+  f:write(hash)
+  f:close()
+end
+
+---Validate that the stored SHA256 for a cache key still matches the AppImage.
+---Returns false (mismatch) when:
+---  • the .sha256 file does not exist (old/unvalidated cache entry)
+---  • the stored hash and the computed hash differ
+---@param real_path string resolved (non-symlink) path to the AppImage
+---@param key string cache key
+---@return boolean valid
+local function validate_bundle_hash(real_path, key)
+  local path = hash_file_path(key)
+  local f = io.open(path, "r")
+  if not f then return false end
+  local stored = vim.trim(f:read("*a") or "")
+  f:close()
+  if #stored ~= 64 then return false end
+
+  local res = vim.system({ "sha256sum", real_path }, { text = true }):wait()
+  if res.code ~= 0 or not res.stdout then return false end
+  local computed = vim.trim(vim.split(res.stdout, "%s+")[1] or "")
+  return computed == stored
+end
+
 ---Resolve a Nix attribute to a concrete store outPath. Synchronous because
 ---it must complete before the bundle command can run; the call is fast for
 ---cached evaluations.
@@ -74,6 +120,10 @@ local function eval_out_path(attr)
 end
 
 ---Ensure a bundled AppImage exists on disk for the given attribute.
+---On a cache hit the stored SHA256 is validated against the current file.
+---A missing or mismatched hash is treated as a stale cache entry: the cache
+---is cleared and the bundle is rebuilt so any closure change is picked up
+---automatically.
 ---@param attr string nix flake attribute (e.g. "nixpkgs#neovim")
 ---@param cb fun(bundle_path: string?, err: string?)
 function M.ensure_nix_bundle(attr, cb)
@@ -81,7 +131,16 @@ function M.ensure_nix_bundle(attr, cb)
   local bundle_path = cache_dir() .. "/" .. key
 
   if vim.fn.filereadable(bundle_path) == 1 then
-    return cb(bundle_path, nil)
+    local real = vim.fn.resolve(bundle_path)
+    if validate_bundle_hash(real, key) then
+      return cb(bundle_path, nil)
+    end
+    -- Hash missing or mismatch — stale cache; clear and rebuild.
+    vim.notify(
+      "Cached Neovim bundle is out of date, rebuilding...",
+      vim.log.levels.INFO
+    )
+    M.clear_cache()
   end
 
   vim.notify("Building Nix AppImage for " .. attr .. " — this may take a few minutes...", vim.log.levels.INFO)
@@ -102,6 +161,7 @@ function M.ensure_nix_bundle(attr, cb)
     if vim.fn.filereadable(real) ~= 1 then
       return cb(nil, "bundle artifact missing at " .. real)
     end
+    compute_and_store_hash(real, key)
     cb(real, nil)
   end))
 end
@@ -339,6 +399,7 @@ end
 
 ---Trim the bundle cache to the newest `config.nvim_cache_versions` entries
 ---by mtime. Safe to call anytime; no-op when the cache fits.
+---Deletes the accompanying .sha256 file when a bundle is evicted.
 function M.prune_cache()
   local keep = config.nvim_cache_versions or 3
   local uv = vim.uv or vim.loop
@@ -349,17 +410,21 @@ function M.prune_cache()
   while true do
     local name, _ = uv.fs_scandir_next(handle)
     if not name then break end
-    local path = dir .. "/" .. name
-    -- Resolve symlinks so we compare/keep the underlying store result.
-    local real = vim.fn.resolve(path)
-    local stat = uv.fs_stat(real)
-    if stat then
-      table.insert(entries, { path = path, mtime = stat.mtime.sec })
+    -- Skip hash sidecar files; they are managed alongside their bundle.
+    if not name:match("%.sha256$") then
+      local path = dir .. "/" .. name
+      -- Resolve symlinks so we compare/keep the underlying store result.
+      local real = vim.fn.resolve(path)
+      local stat = uv.fs_stat(real)
+      if stat then
+        table.insert(entries, { path = path, mtime = stat.mtime.sec })
+      end
     end
   end
   table.sort(entries, function(a, b) return a.mtime > b.mtime end)
   for i = keep + 1, #entries do
     pcall(uv.fs_unlink, entries[i].path)
+    pcall(uv.fs_unlink, entries[i].path .. ".sha256")
   end
 end
 
