@@ -150,9 +150,15 @@ local function attach_to_container(container_id, config_path, config, command, o
         -- WORKDIR when workspaceFolder is not set in devcontainer.json.
         local workspace_dir = config and config.workspaceFolder
         local cd_prefix = workspace_dir and ("cd " .. vim.fn.shellescape(workspace_dir) .. " && ") or ""
-        local launch_script = cd_prefix .. "nohup " .. install_dir .. "/app/AppRun --headless"
-          .. " --listen 0.0.0.0:" .. tostring(port)
-          .. " >/dev/null 2>&1 &"
+        -- When .direct_exec is present the installer has symlinked /nix/store so
+        -- nvim can be run directly from the entrypoint without AppRun's bwrap
+        -- user-namespace.  This restores sudo (and other setuid helpers) inside
+        -- :terminal sessions.  Falls back to AppRun when the marker is absent.
+        local launch_script = cd_prefix
+          .. string.format(
+            "d=%s; if [ -e \"$d/.direct_exec\" ]; then NVIM_LAUNCHER=\"$d/app/entrypoint\"; else NVIM_LAUNCHER=\"$d/app/AppRun\"; fi; nohup \"$NVIM_LAUNCHER\" --headless --listen 0.0.0.0:%d >/dev/null 2>&1 &",
+            install_dir, port
+          )
         cli.exec(container_id, "/bin/sh", { "-c", launch_script }, {
         remote_env = remote_env,
         on_exit = sched(function(result)

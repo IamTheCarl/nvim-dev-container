@@ -24,9 +24,18 @@ end
 
 ---Shell snippet that ensures the bundled nvim AppImage is extracted and
 ---runnable at the installer-managed path.
+---
+---Prefers direct execution via `entrypoint` when the `.direct_exec` marker
+---is present (set by installer.try_setup_direct_exec when a /nix/store
+---symlink was successfully created).  Falls back to AppRun otherwise.
 local function probe_cmd()
   local dir = config.nvim_install_dir or "$HOME/.nvim-devcontainer"
-  return '"' .. dir .. '/app/AppRun" --version >/dev/null 2>&1'
+  -- Note: quoting uses single quotes because dir may contain $HOME which
+  -- must expand in the container shell, not in Lua.
+  return string.format(
+    "d=%s; if [ -e \"$d/.direct_exec\" ]; then NVIM=\"$d/app/entrypoint\"; else NVIM=\"$d/app/AppRun\"; fi; \"$NVIM\" --version >/dev/null 2>&1",
+    dir
+  )
 end
 
 ---Check if Neovim is available in the container at the installer path.

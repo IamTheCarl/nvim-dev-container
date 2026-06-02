@@ -3,12 +3,15 @@
 ---Bundles the user's Neovim (or a user-specified flake attribute) using
 ---`nix bundle` with the toAppImage bundler, caches the resulting AppImage on
 ---the host, streams it into the target container via `docker exec -i`, and
----extracts it in-place. No root or sudo required inside the container.
+---extracts it in-place.
 ---
----The AppImage runtime sets VIMRUNTIME / LD_LIBRARY_PATH and execs nvim
----directly — no chroot, no user-namespace re-rooting — so :terminal, :!cmd,
----and LSP-spawned processes can reach arbitrary host binaries in the
----container's filesystem.
+---After extraction the installer tries (as root) to symlink the container's
+---`/nix/store` to the extracted bundle's nix directory.  When this succeeds
+---the `<install_dir>/.direct_exec` marker is written and nvim is launched
+---directly via the `entrypoint` symlink — bypassing AppRun's bwrap user
+---namespace entirely.  This restores sudo (and other setuid helpers) inside
+---:terminal sessions.  When root access is unavailable the marker is absent
+---and AppRun is used as a fallback (sudo will not work in :terminal).
 ---@brief ]]
 
 local M = {}
@@ -106,6 +109,56 @@ end
 ---Chunk size for streaming the AppImage into the container. 1 MiB keeps
 ---peak Lua heap bounded and yields ~80 schedule ticks for a typical bundle.
 local STREAM_CHUNK = 1024 * 1024
+
+---Attempt to symlink the container's /nix/store to the extracted bundle's nix
+---directory, running the mkdir/ln as root via `docker exec --user root`.
+---When successful, writes a `.direct_exec` marker so the launcher knows it
+---can bypass AppRun's user-namespace chroot.
+---
+---Fails silently when root access is not available (marker absent → AppRun
+---fallback is used; sudo will not work inside :terminal in that case).
+---
+---@param container_id string
+---@param cb fun(ok: boolean)
+function M.try_setup_direct_exec(container_id, cb)
+  local docker = config.docker_command or "docker"
+  local install_dir = config.nvim_install_dir or "$HOME/.nvim-devcontainer"
+
+  -- Step 1: resolve $HOME in the container user context (root's $HOME differs).
+  vim.system(
+    { docker, "exec", container_id, "sh", "-c", "echo " .. install_dir },
+    { text = true },
+    sched(function(r1)
+      if r1.code ~= 0 then return cb(false) end
+      local actual = vim.trim(r1.stdout or "")
+      if actual == "" then return cb(false) end
+
+      -- Step 2: as root, create /nix and symlink /nix/store → <actual>/app/nix/store.
+      -- Use -sfn so re-installs update a stale symlink.
+      -- Skip if /nix/store is already a real (non-symlink) directory — the container
+      -- has its own nix; we leave it alone and let AppRun handle isolation.
+      local root_script = string.format(
+        "if [ -d /nix/store ] && [ ! -L /nix/store ]; then exit 1; fi; "
+          .. "mkdir -p /nix && ln -sfn %s/app/nix/store /nix/store",
+        actual
+      )
+      vim.system(
+        { docker, "exec", "--user", "root", container_id, "sh", "-c", root_script },
+        { text = true },
+        sched(function(r2)
+          if r2.code ~= 0 then return cb(false) end
+
+          -- Step 3: touch the marker as the container user.
+          vim.system(
+            { docker, "exec", container_id, "touch", actual .. "/.direct_exec" },
+            { text = true },
+            sched(function(r3) cb(r3.code == 0) end)
+          )
+        end)
+      )
+    end)
+  )
+end
 
 ---Stream the AppImage into the container and extract it in-place.
 ---Bypasses devcontainer CLI; uses `docker exec -i` directly. Wipes any
@@ -258,7 +311,20 @@ function M.install(container_id, opts)
     -- network/disk-bound phase; 100 is reserved for post-extract success.
     M.stream_and_extract(container_id, nvim_bundle, function(ok_n, sn_err)
       if not ok_n then return finish(false, sn_err) end
-      finish(true, nil)
+
+      -- Step 3: optionally set up /nix/store symlink for direct execution.
+      -- This removes AppRun's bwrap user-namespace so sudo works in :terminal.
+      -- Silently skipped when root access is unavailable (AppRun used instead).
+      M.try_setup_direct_exec(container_id, function(direct_ok)
+        if not direct_ok then
+          log.fmt_warn(
+            "Could not set up /nix/store symlink in %s (no root access or real nix store present). "
+              .. "AppRun will be used — sudo and other setuid helpers will not work inside :terminal.",
+            container_id
+          )
+        end
+        finish(true, nil)
+      end)
     end, sched(function(bytes_written, total)
       if total > 0 then
         local pct = 50 + math.floor((bytes_written / total) * 49)
