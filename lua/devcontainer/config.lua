@@ -7,42 +7,6 @@
 
 local M = {}
 
-local function default_terminal_handler(command)
-  local laststatus = vim.o.laststatus
-  local lastheight = vim.o.cmdheight
-  vim.cmd("tabnew")
-  local bufnr = vim.api.nvim_get_current_buf()
-  vim.o.laststatus = 0
-  vim.o.cmdheight = 0
-  local au_id = vim.api.nvim_create_augroup("devcontainer.container.terminal", {})
-  vim.api.nvim_create_autocmd("BufEnter", {
-    buffer = bufnr,
-    group = au_id,
-    callback = function()
-      vim.o.laststatus = 0
-      vim.o.cmdheight = 0
-    end,
-  })
-  vim.api.nvim_create_autocmd("BufLeave", {
-    buffer = bufnr,
-    group = au_id,
-    callback = function()
-      vim.o.laststatus = laststatus
-      vim.o.cmdheight = lastheight
-    end,
-  })
-  vim.api.nvim_create_autocmd("BufDelete", {
-    buffer = bufnr,
-    group = au_id,
-    callback = function()
-      vim.o.laststatus = laststatus
-      vim.api.nvim_del_augroup_by_id(au_id)
-      vim.o.cmdheight = lastheight
-    end,
-  })
-  vim.fn.termopen(command)
-end
-
 local function workspace_folder_provider()
   local folders = vim.lsp.buf.list_workspace_folders()
   return folders[1] or vim.loop.cwd()
@@ -78,11 +42,6 @@ local function default_devcontainer_json_template()
   }
 end
 
----@Handles terminal requests (mainly used for attaching to container)
----By default it uses terminal command
----@type function
-M.terminal_handler = default_terminal_handler
-
 ---Provides docker build path
 ---By default uses first LSP workplace folder or vim.loop.cwd()
 ---@type function
@@ -99,11 +58,6 @@ M.config_search_start = config_search_start
 ---This flag can be used to prevent it and only look in M.config_search_start
 ---@type boolean
 M.disable_recursive_config_search = false
-
----Flag to enable image caching after adding neovim - to make further attaching faster
----True by default
----@type boolean
-M.cache_images = true
 
 ---Provides template for creating new .devcontainer.json files
 ---This function should return a table listing lines of the file
@@ -135,41 +89,6 @@ M.nvim_cache_versions = 3
 ---@type string
 M.docker_command = "docker"
 
----@class MountOpts
----@field enabled boolean if true this mount is enabled
----@field options table[string]|nil additional bind options, useful to define { "readonly" }
-
----@class AttachMountsOpts
----@field neovim_config? MountOpts if true attaches neovim local config to /root/.config/nvim in container
----@field neovim_data? MountOpts if true attaches neovim data to /root/.local/share/nvim in container
----@field neovim_state? MountOpts if true attaches neovim state to /root/.local/state/nvim in container
-
----Configuration for mounts when using attach command
----NOTE: when attaching in a separate command, it is useful to set
----always to true, since these have to be attached when starting
----Useful to mount neovim configuration into container
----Applicable only to `devcontainer.commands` functions!
----@type AttachMountsOpts
-M.attach_mounts = {
-  neovim_config = {
-    enabled = false,
-    options = { "readonly" },
-  },
-  neovim_data = {
-    enabled = false,
-    options = {},
-  },
-  neovim_state = {
-    enabled = false,
-    options = {},
-  },
-}
-
----List of mounts to always add to all containers
----Applicable only to `devcontainer.commands` functions!
----@type table[string]
-M.always_mount = {}
-
 ---@alias LogLevel
 ---| '"trace"'
 ---| '"debug"'
@@ -181,12 +100,6 @@ M.always_mount = {}
 ---Current log level
 ---@type LogLevel
 M.log_level = "info"
-
----List of env variables to add to all containers started with this plugin
----Applicable only to `devcontainer.commands` functions!
----NOTE: This does not support "${localEnv:VAR_NAME}" syntax - use vim.env
----@type table[string, string]
-M.container_env = {}
 
 ---List of env variables to add to all containers when attaching
 ---Applicable only to `devcontainer.commands` functions!

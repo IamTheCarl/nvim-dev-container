@@ -85,10 +85,6 @@ local function parse_json_output(output)
   if last_json ~= "" then
     local ok, data = pcall(vim.json.decode, last_json, { luanil = { object = true, array = true } })
     if ok then
-      if type(data) == "table" then
-        local keys = {}
-        for k in pairs(data) do table.insert(keys, k) end
-      end
       return data
     end
   end
@@ -288,7 +284,6 @@ function M.exec(target, cmd, cmd_args, opts)
   if type(cmd_args) == "table" and not vim.islist(cmd_args) then
     opts = cmd_args
     cmd_args = nil
-  else
   end
 
   local cli_args = { "exec" }
@@ -311,9 +306,6 @@ function M.exec(target, cmd, cmd_args, opts)
     vim.list_extend(cli_args, cmd_args)
   end
 
-
- 
-
   if opts.workspace_folder and (not target or not target:match("^/")) then
     vim.list_extend(cli_args, { "--workspace-folder", opts.workspace_folder })
   end
@@ -331,13 +323,16 @@ function M.exec(target, cmd, cmd_args, opts)
   return run_cli(cli_args, opts)
 end
 
----Stop a dev container by stopping and removing it
+---Recreate a dev container by removing the existing one and starting a fresh
+---one from the current configuration. The @devcontainers/cli (as of 0.87)
+---ships no `down` subcommand, so this is implemented as
+---`devcontainer up --remove-existing-container --expect-existing-container=false`.
 ---@param workspace_folder string path to workspace folder
 ---@param opts? table options
 ---@field config? string devcontainer.json path
 ---@field on_exit? fun(result: CliResult) callback
 ---@return table? handle, integer? pid
-function M.down(workspace_folder, opts)
+function M.recreate(workspace_folder, opts)
   opts = opts or {}
   M.ensure_available()
 
@@ -431,9 +426,8 @@ function M.find_container(container_id, workspace_folder, config_path, on_succes
   -- The CLI automatically resolves container by devcontainer.local_folder label
   M.exec(workspace_folder, "echo", { "test" }, {
     on_exit = function(result)
-if result.code == 0 then
+      if result.code == 0 then
         -- Container exists, now get its ID via docker inspect
-        local uv = vim.loop
         local normalized_path = vim.fn.fnamemodify(workspace_folder, ":p"):gsub("/$", "")
         local label = "devcontainer.local_folder=" .. normalized_path
         local stdout = uv.new_pipe(false)
@@ -442,7 +436,7 @@ if result.code == 0 then
         local captured_stderr = {}
 
         local handle, pid = uv.spawn(
-          "docker",
+          config.docker_command or "docker",
           {
             stdio = { nil, stdout, stderr },
             args = { "ps", "-q", "--filter", "label=" .. label },
@@ -493,4 +487,10 @@ if result.code == 0 then
 end
 
 log.wrap(M)
+
+-- Internal exports for testing only. Not part of the public API.
+M._internal = {
+  parse_json_output = parse_json_output,
+}
+
 return M

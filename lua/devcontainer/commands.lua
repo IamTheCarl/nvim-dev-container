@@ -51,76 +51,6 @@ local function find_nearest_config(start_path, callback)
   callback(nil, nil)
 end
 
----Generate mount string for the socket directory
----@param socket_dir string host path to socket directory
----@return string
-local function socket_mount_string(socket_dir)
-  return "type=bind,source=" .. socket_dir .. ",target=/tmp/nvim-dev-container"
-end
-
----Generate mount strings for attach_mounts config
----@param config table parsed devcontainer.json data from CLI
----@return string[]
-local function generate_attach_mounts(config)
-  local mounts = {}
-  local am = plugin_config.attach_mounts
-
-  if not am or not am.neovim_config and not am.neovim_data and not am.neovim_state then
-    return mounts
-  end
-
-  local home_path = "/root/"
-  if config.remoteUser then
-    home_path = "/home/" .. config.remoteUser .. "/"
-  elseif config.containerUser then
-    home_path = "/home/" .. config.containerUser .. "/"
-  end
-
-  local function build_mount(stdpath_location, options, target)
-    local mount_parts = { "type=bind" }
-    table.insert(mount_parts, "source=" .. vim.fn.stdpath(stdpath_location))
-    table.insert(mount_parts, "target=" .. target)
-    if options and #options > 0 then
-      for _, opt in ipairs(options) do
-        table.insert(mount_parts, opt)
-      end
-    end
-    return table.concat(mount_parts, ",")
-  end
-
-  if am.neovim_config and am.neovim_config.enabled then
-    table.insert(mounts, build_mount("config", am.neovim_config.options, home_path .. ".config/nvim"))
-  end
-  if am.neovim_data and am.neovim_data.enabled then
-    table.insert(mounts, build_mount("data", am.neovim_data.options, home_path .. ".local/share/nvim"))
-  end
-  if am.neovim_state and am.neovim_state.enabled then
-    table.insert(mounts, build_mount("state", am.neovim_state.options, home_path .. ".local/state/nvim"))
-  end
-
-  return mounts
-end
-
----Generate additional mount strings from always_mount config
----@return string[]
-local function generate_always_mounts()
-  local mounts = {}
-  if plugin_config.always_mount then
-    for _, mount in ipairs(plugin_config.always_mount) do
-      if type(mount) == "table" then
-        local parts = {}
-        for k, v in pairs(mount) do
-          table.insert(parts, k .. "=" .. v)
-        end
-        table.insert(mounts, table.concat(parts, ","))
-      else
-        table.insert(mounts, mount)
-      end
-    end
-  end
-  return mounts
-end
-
 ---Run lifecycle commands in container
 ---@param config table parsed devcontainer.json data from CLI
 ---@param container_id string
@@ -344,10 +274,6 @@ function M.attach(opts)
         end
 
         local raw_data = read_result.data
-        if type(raw_data) == "table" then
-          local keys = {}
-          for k in pairs(raw_data) do table.insert(keys, k) end
-        end
         local config = raw_data and raw_data.mergedConfiguration or raw_data and raw_data.configuration
         if not config then
           vim.notify("No configuration found in devcontainer config", vim.log.levels.ERROR)
@@ -447,7 +373,7 @@ function M.stop(opts)
   opts = opts or {}
 
   local function on_config_found(path, dir)
-    cli.down(dir or vim.loop.cwd(), {
+    cli.recreate(dir or vim.loop.cwd(), {
       config = path,
       on_exit = sched(function(result)
         if result.code == 0 then
@@ -570,7 +496,6 @@ function M.add_neovim(opts)
 
       cli.find_container(nil, workspace_folder, config_path, function(container_id)
         nvim.add_neovim(container_id, {
-          install_as_root = plugin_config.nvim_install_as_root,
           on_success = sched(function()
             vim.notify("Neovim added successfully to container " .. container_id, vim.log.levels.INFO)
             if type(opts.callback) == "function" then
@@ -612,4 +537,10 @@ function M.edit_config()
 end
 
 log.wrap(M)
+
+-- Internal exports for testing only. Not part of the public API.
+M._internal = {
+  find_nearest_config = find_nearest_config,
+}
+
 return M

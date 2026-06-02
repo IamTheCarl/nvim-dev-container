@@ -1,172 +1,151 @@
-# devcontainer
+# nvim-dev-container
 
-[![Dotfyle](https://dotfyle.com/plugins/esensar/nvim-dev-container/shield)](https://dotfyle.com/plugins/esensar/nvim-dev-container)
 [![License](https://img.shields.io/badge/license-MIT-brightgreen)](/LICENSE)
-[![status-badge](https://ci.codeberg.org/api/badges/8585/status.svg)](https://ci.codeberg.org/repos/8585)
 
-Goal of this plugin is to provide functionality similar to VSCode's [remote container development](https://code.visualstudio.com/docs/remote/containers) plugin and other functionality that enables development in docker container. This plugin is inspired by [jamestthompson3/nvim-remote-containers](https://github.com/jamestthompson3/nvim-remote-containers), but aims to enable having neovim embedded in docker container.
+A thin Neovim front-end for the official [`@devcontainers/cli`][cli]. The plugin
+delegates all container orchestration (image build, container up, lifecycle
+hooks, feature resolution, mount/env handling, etc.) to the CLI and focuses on
+two things:
 
-**NOTE:** If you do not have an account registered and do not want to register one, you can use mailing lists to report bugs, discuss the project and send patches:
- - [discussions mailing list](https://lists.sr.ht/~esensar/nvim-dev-container-discuss)
- - [development mailing list](https://lists.sr.ht/~esensar/nvim-dev-container-devel)
+1. Finding the nearest `devcontainer.json` for the current workspace.
+2. Streaming a locally-built Neovim into the container and attaching to it as a
+   remote UI client (`:connect`).
 
-**WORK IN PROGRESS**
+This is a fork rewritten on top of the CLI; see git history for the previous
+custom Docker/Podman/compose orchestration.
 
-[![asciicast](https://asciinema.org/a/JFwfoaBQwYoR7f5w0GuFPZDj8.svg)](https://asciinema.org/a/JFwfoaBQwYoR7f5w0GuFPZDj8)
+[cli]: https://github.com/devcontainers/cli
 
 ## Requirements
 
-- [NeoVim](https://neovim.io) version 0.12.0+ (previous versions may be supported, but are not tested - commands and autocommands will definitely fail and attaching will resort to terminal buffer instead of Neovim client/server mode)
-- [nvim-treesitter](https://github.com/nvim-treesitter/nvim-treesitter) with included `json` parser (or manually installed json parser)
+- Neovim 0.12.0+ (uses the built-in `:connect` remote UI client).
+- The [`@devcontainers/cli`][cli] binary on `PATH` (or pass `cli_path`).
+- A container runtime the CLI can drive (Docker or Podman).
+- `nix` on `PATH` on the host — used by the installer to produce an AppImage of
+  the configured Neovim that gets streamed into the container.
+- For projects with local-path features that live outside the workspace's
+  `.devcontainer/` folder, a CLI build that resolves feature parent paths from
+  the config file's directory rather than `<workspace>/.devcontainer`.
 
 ## Installation
 
-Install using favourite plugin manager.
-
-e.g. Using [lazy.nvim](https://github.com/folke/lazy.nvim)
-
-```lua
-{
-  'https://codeberg.org/esensar/nvim-dev-container',
-  dependencies = 'nvim-treesitter/nvim-treesitter'
-}
-```
-
-or assuming `nvim-treesitter` is already available:
+Install with your plugin manager of choice. The plugin has no Lua dependencies
+beyond Neovim itself.
 
 ```lua
-{ 'https://codeberg.org/esensar/nvim-dev-container' }
+{ 'IamTheCarl/nvim-dev-container' }
 ```
 
 ## Usage
 
-To use the plugin with defaults just call the `setup` function:
-
 ```lua
-require("devcontainer").setup{}
+require("devcontainer").setup({
+  -- Optional. Flake reference passed to `nix bundle` to produce the Neovim
+  -- that gets installed into the container. Defaults to `nixpkgs#neovim`.
+  -- nvim_nix_attribute = "github:me/dotfiles#neovim",
+})
 ```
 
-It is possible to override some of the functionality of the plugin with options passed into `setup`. Everything passed to `setup` is optional. Following block represents default values:
+Then, from inside a project that contains a `devcontainer.json`:
+
+```
+:DevcontainerAttach
+```
+
+The plugin will:
+
+1. Walk up from `config_search_start()` looking for
+   `.devcontainer/devcontainer.json` or `.devcontainer.json`.
+2. Ask the CLI to read the merged configuration.
+3. Find or create the container via `devcontainer up`.
+4. Run `onCreateCommand`, `updateContentCommand`, `postCreateCommand` inside
+   the container.
+5. Probe for a previously-installed Neovim under `nvim_install_dir`; if absent,
+   build the configured `nvim_nix_attribute` into an AppImage on the host,
+   stream it into the container in 1 MiB chunks over `docker exec`, and
+   extract it.
+6. Launch headless Neovim inside the container on a random port bound to
+   `0.0.0.0`, resolve the container's bridge IP, and `:connect` to it.
+7. Run `postAttachCommand` on the host (per the devcontainer spec).
+
+Use `:detach` to disconnect from the remote UI without stopping the container.
+
+## Commands
+
+When `generate_commands` is not `false`:
+
+| Command | Description |
+|---------|-------------|
+| `DevcontainerAttach [cmd]` | Find/start the container and attach Neovim (default) or run a custom command. |
+| `DevcontainerStop` | Recreate the container (`up --remove-existing-container`). |
+| `DevcontainerExec <cmd>` | Run a command inside the existing container. |
+| `DevcontainerLogs` | Open the plugin's log file. |
+| `DevcontainerEditNearestConfig` | Open or scaffold `devcontainer.json`. |
+| `DevcontainerAddNeovim` | Install (or re-install) Neovim into the container. |
+| `DevcontainerClearCache` | Drop the on-host Nix AppImage cache. |
+
+## Setup options
+
+Every key is optional. Defaults shown.
 
 ```lua
-require("devcontainer").setup {
-  config_search_start = function()
-    -- By default this function uses vim.loop.cwd()
-    -- This is used to find a starting point for .devcontainer.json file search
-    -- Since by default, it is searched for recursively
-    -- That behavior can also be disabled
-  end,
+require("devcontainer").setup({
+  config_search_start = function() return vim.loop.cwd() end,
   workspace_folder_provider = function()
-    -- By default this function uses first workspace folder for integrated lsp if available and vim.loop.cwd() as a fallback
-    -- This is used to replace `${localWorkspaceFolder}` in devcontainer.json
-    -- Also used for creating default .devcontainer.json file
+    return (vim.lsp.buf.list_workspace_folders() or {})[1] or vim.loop.cwd()
   end,
-  terminal_handler = function(command)
-    -- By default this function creates a terminal in a new tab using :terminal command
-    -- It also removes statusline when that tab is active, to prevent double statusline
-    -- It can be overridden to provide custom terminal handling
-  end,
-  nvim_installation_commands_provider = function(path_binaries, version_string)
-    -- Returns table - list of commands to run when adding neovim to container
-    -- Each command can either be a string or a table (list of command parts)
-    -- Takes binaries available in path on current container and version_string passed to the command or current version of neovim
-  end,
-  -- Can be set to true to install neovim as root in container
-  -- Usually not required, but could help if permission errors occur during install
-  nvim_install_as_root = false,
-  devcontainer_json_template = function()
-    -- Returns table - list of lines to set when creating new devcontainer.json files
-    -- As a template
-    -- Used only when using functions from commands module or created commands
-  end,
-  -- Can be set to false to prevent generating default commands
-  -- Default commands are listed below
+  devcontainer_json_template = function() --[[ returns a list of lines ]] end,
+
+  -- Neovim installer
+  nvim_nix_attribute = "nixpkgs#neovim", -- flake ref consumed by `nix bundle`
+  nvim_install_dir = "$HOME/.nvim-devcontainer", -- inside the container
+  nvim_cache_versions = 3, -- on-host AppImage cache retention
+
+  -- Container runtime
+  docker_command = "docker", -- override to "podman" etc.
+  cli_path = nil,            -- absolute path to devcontainer CLI; nil = PATH lookup
+  remote_env = {},           -- forwarded to `devcontainer exec` as --remote-env
+
+  -- Misc
   generate_commands = true,
-  -- By default no autocommands are generated
-  -- This option can be used to configure automatic starting and cleaning of containers
   autocommands = {
-    -- can be set to true to automatically start containers when devcontainer.json is available
-    init = false,
-    -- can be set to true to automatically remove any started containers and any built images when exiting vim
-    clean = false,
-    -- can be set to true to automatically restart containers when devcontainer.json file is updated
-    update = false,
+    init = false,   -- true|"ask" to auto-attach when a devcontainer.json is found
+    clean = false,  -- auto-stop on VimLeavePre
+    update = false, -- auto-restart when devcontainer.json changes
   },
-  -- can be changed to increase or decrease logging from library
   log_level = "info",
-  -- can be set to true to disable recursive search
-  -- in that case only .devcontainer.json and .devcontainer/devcontainer.json files will be checked relative
-  -- to the directory provided by config_search_start
   disable_recursive_config_search = false,
-  -- can be set to false to disable image caching when adding neovim
-  -- by default it is set to true to make attaching to containers faster after first time
-  cache_images = true,
-  -- By default all mounts are added (config, data and state)
-  -- This can be changed to disable mounts or change their options
-  -- This can be useful to mount local configuration
-  -- And any other mounts when attaching to containers with this plugin
-  attach_mounts = {
-    neovim_config = {
-      -- enables mounting local config to /root/.config/nvim in container
-      enabled = false,
-      -- makes mount readonly in container
-      options = { "readonly" }
-    },
-    neovim_data = {
-      -- enables mounting local data to /root/.local/share/nvim in container
-      enabled = false,
-      -- no options by default
-      options = {}
-    },
-    -- Only useful if using neovim 0.8.0+
-    neovim_state = {
-      -- enables mounting local state to /root/.local/state/nvim in container
-      enabled = false,
-      -- no options by default
-      options = {}
-    },
-  },
-  -- This takes a list of mounts (strings) that should always be added to every run container
-  -- This is passed directly as --mount option to docker command
-  -- Or multiple --mount options if there are multiple values
-  always_mount = {},
-  -- This takes a string (usually either "podman" or "docker") representing container runtime - "devcontainer-cli" is also partially supported
-  -- That is the command that will be invoked for container operations
-  -- If it is nil, plugin will use whatever is available (trying "podman" first)
-  container_runtime = nil,
-  -- Similar to container runtime, but will be used if main runtime does not support an action - useful for "devcontainer-cli"
-  backup_runtime = nil,
-  -- This takes a string (usually either "podman-compose" or "docker-compose") representing compose command - "devcontainer-cli" is also partially supported
-  -- That is the command that will be invoked for compose operations
-  -- If it is nil, plugin will use whatever is available (trying "podman-compose" first)
-  compose_command = nil,
-  -- Similar to compose command, but will be used if main command does not support an action - useful for "devcontainer-cli"
-  backup_compose_command = nil,
-}
+})
 ```
 
-Check out [wiki](https://codeberg.org/esensar/nvim-dev-container/wiki) for more information.
+## Architecture
 
-### Commands
+```
+lua/devcontainer/
+  cli.lua        -- thin wrapper around @devcontainers/cli (up/exec/recreate/read-config/find-container)
+  commands.lua   -- user-facing operations; find_nearest_config, attach flow, lifecycle hooks
+  config.lua     -- plugin config singleton
+  health.lua     -- :checkhealth
+  init.lua       -- setup() + DevcontainerXxx user commands + optional autocommands
+  status.lua     -- in-process container/build status tracking
+  internal/
+    cmdline.lua, executor.lua, log.lua, utils.lua, validation.lua
+    installer.lua -- nix-bundle host-side cache + chunked stream into container
+    nvim.lua      -- is_installed probe; add_neovim delegates to installer
+```
 
-If not disabled by using `generate_commands = false` in setup, this plugin provides the following commands:
+## Testing
 
-- `DevcontainerStart` - start whatever is defined in devcontainer.json
-- `DevcontainerAttach` - attach to whatever is defined in devcontainer.json
-- `DevcontainerExec` - execute a single command on container defined in devcontainer.json
-- `DevcontainerStop` - stop whatever was started based on devcontainer.json
-- `DevcontainerStopAll` - stop everything started with this plugin (in current session)
-- `DevcontainerRemoveAll` - remove everything started with this plugin (in current session)
-- `DevcontainerLogs` - open plugin log file
-- `DevcontainerEditNearestConfig` - opens nearest devcontainer.json file if it exists, or creates a new one if it does not
+```sh
+./scripts/test
+```
 
-### Functions
-
-Check out [:h devcontainer](doc/devcontainer.txt) for full list of functions.
+This bootstraps a local `.testenv/` with plenary and nvim-treesitter and runs
+the plenary harness against `tests/`.
 
 ## Contributing
 
-Check out [contributing guidelines](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

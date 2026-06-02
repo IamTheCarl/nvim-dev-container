@@ -19,7 +19,6 @@ local configured = false
 ---@class DevcontainerSetupOpts
 ---@field config_search_start? function provides starting point for .devcontainer.json search
 ---@field workspace_folder_provider? function provides current workspace folder
----@field terminal_handler? function handles terminal command requests, useful for floating terminals and similar
 ---@field devcontainer_json_template? function provides template for new .devcontainer.json files - returns table
 ---@field nvim_nix_attribute? string Nix flake attribute used to bundle Neovim for the container (default `nixpkgs#neovim`)
 ---@field nvim_install_dir? string Install directory inside the container (default `$HOME/.nvim-devcontainer`)
@@ -28,12 +27,8 @@ local configured = false
 ---@field generate_commands? boolean can be set to false to prevent plugin from creating commands (true by default)
 ---@field autocommands? DevcontainerAutocommandOpts can be set to enable autocommands, disabled by default
 ---@field log_level? LogLevel can be used to override library logging level
----@field container_env? table can be used to override containerEnv for all started containers
 ---@field remote_env? table can be used to override remoteEnv when attaching to containers
 ---@field disable_recursive_config_search? boolean can be used to disable recursive .devcontainer search
----@field cache_images? boolean can be used to cache images after adding neovim - true by default
----@field attach_mounts? AttachMountsOpts can be used to configure mounts when adding neovim to containers
----@field always_mount? table[table|string] list of mounts to add to every container
 ---@field cli_path? string path to devcontainer CLI executable (useful for Nix installations)
 
 ---Starts the plugin and sets it up with provided options
@@ -49,7 +44,6 @@ function M.setup(opts)
   v.validate_opts(opts, {
     config_search_start = "function",
     workspace_folder_provider = "function",
-    terminal_handler = "function",
     devcontainer_json_template = "function",
     nvim_nix_attribute = function(t)
       return t == nil or type(t) == "string"
@@ -66,14 +60,8 @@ function M.setup(opts)
     generate_commands = "boolean",
     autocommands = "table",
     log_level = "string",
-    container_env = "table",
     remote_env = "table",
     disable_recursive_config_search = "boolean",
-    cache_images = "boolean",
-    attach_mounts = "table",
-    always_mount = function(t)
-      return t == nil or vim.islist(t)
-    end,
     cli_path = function(t)
       return t == nil or type(t) == "string"
     end,
@@ -87,37 +75,8 @@ function M.setup(opts)
     })
   end
 
-  local am = opts.attach_mounts
-  if am then
-    v.validate_deep(am, "opts.attach_mounts", {
-      neovim_config = "table",
-      neovim_data = "table",
-      neovim_state = "table",
-    })
-
-    local mount_opts_mapping = {
-      enabled = "boolean",
-      options = function(t)
-        return t == nil or vim.islist(t)
-      end,
-    }
-
-    if am.neovim_config then
-      v.validate_deep(am.neovim_config, "opts.attach_mounts.neovim_config", mount_opts_mapping)
-    end
-
-    if am.neovim_data then
-      v.validate_deep(am.neovim_data, "opts.attach_mounts.neovim_data", mount_opts_mapping)
-    end
-
-    if am.neovim_state then
-      v.validate_deep(am.neovim_state, "opts.attach_mounts.neovim_state", mount_opts_mapping)
-    end
-  end
-
   configured = true
 
-  config.terminal_handler = opts.terminal_handler or config.terminal_handler
   config.devcontainer_json_template = opts.devcontainer_json_template or config.devcontainer_json_template
   config.nvim_nix_attribute = opts.nvim_nix_attribute or config.nvim_nix_attribute
   config.nvim_install_dir = opts.nvim_install_dir or config.nvim_install_dir
@@ -125,19 +84,13 @@ function M.setup(opts)
   config.docker_command = opts.docker_command or config.docker_command
   config.workspace_folder_provider = opts.workspace_folder_provider or config.workspace_folder_provider
   config.config_search_start = opts.config_search_start or config.config_search_start
-  config.always_mount = opts.always_mount or config.always_mount
-  config.attach_mounts = opts.attach_mounts or config.attach_mounts
   config.disable_recursive_config_search = opts.disable_recursive_config_search
     or config.disable_recursive_config_search
-  if opts.cache_images ~= nil then
-    config.cache_images = opts.cache_images
-  end
   if vim.env.NVIM_DEVCONTAINER_DEBUG then
     config.log_level = "trace"
   else
     config.log_level = opts.log_level or config.log_level
   end
-  config.container_env = opts.container_env or config.container_env
   config.remote_env = opts.remote_env or config.remote_env
 
   if opts.cli_path then
