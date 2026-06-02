@@ -152,13 +152,12 @@ function M.setup(opts)
     vim.api.nvim_create_user_command("DevcontainerClearCache", function(_)
       vim.ui.select({ "Yes", "No" }, { prompt = "Clear Nix bundle cache?" }, function(choice)
         if choice == "Yes" then
-          require("devcontainer.internal.installer").clear_cache()
-          vim.notify("Nix bundle cache cleared.")
+          commands.clear_cache()
         end
       end)
     end, {
       nargs = 0,
-      desc = "Clear the Nix bundle cache used by the Neovim installer",
+      desc = "Clear the host Nix bundle cache and the in-container nvim install",
     })
   end
 

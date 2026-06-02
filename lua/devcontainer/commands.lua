@@ -6,6 +6,7 @@
 
 local cli = require("devcontainer.cli")
 local nvim = require("devcontainer.internal.nvim")
+local installer = require("devcontainer.internal.installer")
 local log = require("devcontainer.internal.log")
 local status = require("devcontainer.status")
 local plugin_config = require("devcontainer.config")
@@ -508,6 +509,52 @@ function M.add_neovim(opts)
         })
       end, function(err)
         vim.notify("No running devcontainer found: " .. err, vim.log.levels.ERROR)
+      end)
+    end
+  )
+end
+
+---Clear the host-side Nix bundle cache, and (if a container can be
+---located for the current workspace) also wipe the extracted nvim
+---install directory inside that container. Without the second step
+---the in-container `is_installed` probe keeps returning true and the
+---next attach silently keeps using the stale install.
+function M.clear_cache()
+  installer.clear_cache()
+  vim.notify("Host Nix bundle cache cleared.")
+
+  find_nearest_config(
+    plugin_config.config_search_start() or vim.loop.cwd(),
+    function(config_path, config_dir)
+      if not config_path then
+        -- No workspace context; host-side clear is all we can do.
+        return
+      end
+
+      local workspace_folder = vim.fn.fnamemodify(config_dir, ":h") or vim.loop.cwd()
+
+      cli.find_container(nil, workspace_folder, config_path, function(container_id)
+        local install_dir = plugin_config.nvim_install_dir or "$HOME/.nvim-devcontainer"
+        cli.exec(container_id, "/bin/sh", { "-c", 'rm -rf "' .. install_dir .. '"' }, {
+          on_exit = sched(function(result)
+            if result.code == 0 then
+              vim.notify(
+                "Cleared nvim install in container " .. container_id .. " (" .. install_dir .. ")"
+              )
+            else
+              vim.notify(
+                "Failed to clear in-container nvim install (exit "
+                  .. tostring(result.code)
+                  .. "); remove "
+                  .. install_dir
+                  .. " manually inside the container.",
+                vim.log.levels.WARN
+              )
+            end
+          end),
+        })
+      end, function(_err)
+        -- No running container; nothing in-container to clear.
       end)
     end
   )
