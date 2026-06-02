@@ -300,12 +300,8 @@ function M.exec(target, cmd, cmd_args, opts)
     end
   end
 
-  table.insert(cli_args, cmd)
-
-  if cmd_args then
-    vim.list_extend(cli_args, cmd_args)
-  end
-
+  -- All devcontainer-exec flags must come before the command; the CLI stops
+  -- parsing its own options at the first positional arg (the command to run).
   if opts.workspace_folder and (not target or not target:match("^/")) then
     vim.list_extend(cli_args, { "--workspace-folder", opts.workspace_folder })
   end
@@ -318,6 +314,12 @@ function M.exec(target, cmd, cmd_args, opts)
 
   if opts.default_user_env_probe then
     vim.list_extend(cli_args, { "--default-user-env-probe", opts.default_user_env_probe })
+  end
+
+  table.insert(cli_args, cmd)
+
+  if cmd_args then
+    vim.list_extend(cli_args, cmd_args)
   end
 
   return run_cli(cli_args, opts)
