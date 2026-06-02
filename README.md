@@ -83,6 +83,43 @@ When `generate_commands` is not `false`:
 | `DevcontainerEditNearestConfig` | Open or scaffold `devcontainer.json`. |
 | `DevcontainerAddNeovim` | Install (or re-install) Neovim into the container. |
 | `DevcontainerClearCache` | Drop the on-host Nix AppImage cache. |
+| `DevcontainerCopyIn[!] [src…] [dest]` | Copy file(s)/director(ies) from host into the container. |
+| `DevcontainerCopyOut[!] [src…] [dest]` | Copy file(s)/director(ies) from container to host. |
+
+### Copying files
+
+Both copy commands follow **scp semantics**: supply one or more sources and a
+destination as positional arguments. The last argument is always the
+destination. If only one argument (or no arguments) is given, the missing
+side(s) are prompted interactively.
+
+```vim
+:DevcontainerCopyIn  /host/my-script.sh  ~/bin/my-script.sh
+:DevcontainerCopyOut ~/logs              /tmp/container-logs
+
+" Multiple sources — destination must be an existing directory
+:DevcontainerCopyIn  file1.txt file2.txt  /workspace/
+
+" Bang form skips the overwrite confirmation prompt
+:DevcontainerCopyIn! /host/config.toml  ~/config.toml
+```
+
+**Container-side paths** are shell-expanded inside the container, so `~`,
+`$HOME`, `$USER`, `/home/$USER/…`, and any other environment variable are all
+supported. Tab-completion is available on container-side arguments (see note
+below).
+
+**Tab-completion on container paths** shells out to the container to `ls`, so
+it causes a brief synchronous pause (typically < 500 ms on a local Docker
+daemon) on the first `<Tab>` press. Host-side paths use normal file completion.
+
+**Directory semantics** follow `docker cp`:
+- Destination does not exist → created as a copy of the source.
+- Destination is a regular file → overwritten (with confirmation, unless `!`).
+- Destination is a directory → source is placed inside it as `dest/basename(src)`.
+
+**`-L` / `--follow-link`** is not a user-visible flag in v1; the default
+`docker cp` behaviour (follow source symlinks) applies.
 
 ## Setup options
 

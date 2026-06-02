@@ -159,6 +159,156 @@ function M.setup(opts)
       nargs = 0,
       desc = "Clear the host Nix bundle cache and the in-container nvim install",
     })
+
+    -- Container-side tab completion helper.
+    -- Runs synchronously via vim.fn.system (completion must return immediately).
+    -- Finds the running container by workspace config, then shells `ls -1a`
+    -- inside the container for the partial path's directory.
+    -- NOTE: This involves two synchronous docker calls and will cause a brief
+    -- hang (typically < 500ms on a local daemon) the first time Tab is pressed.
+    local function complete_container_path(arglead, _cmdline, _cursorpos)
+      local cli_mod = require("devcontainer.cli")
+
+      -- Find config path synchronously
+      local config_search_start = config.config_search_start and config.config_search_start() or vim.loop.cwd()
+      local normalized = vim.fn.fnamemodify(config_search_start, ":p")
+      local config_path = nil
+      local current = normalized
+      while current and current ~= "" do
+        for _, p in ipairs({
+          current .. ".devcontainer/devcontainer.json",
+          current .. ".devcontainer.json",
+        }) do
+          if vim.fn.filereadable(p) == 1 then
+            config_path = p
+            break
+          end
+        end
+        if config_path then break end
+        local parent = current:match("^(.+)/[^/]+/$") or current:match("^(.+)/[^/]+$")
+        if not parent or parent == current then break end
+        current = parent .. "/"
+      end
+
+      if not config_path then
+        return {}
+      end
+
+      -- Determine workspace folder and find container ID synchronously
+      local config_dir = config_path:match("^(.+)/[^/]+$")
+      local workspace_folder = vim.fn.fnamemodify(config_dir .. "/..", ":p"):gsub("/$", "")
+      local label = "devcontainer.local_folder=" .. workspace_folder
+      local container_id_raw = vim.fn.system({
+        config.docker_command or "docker",
+        "ps", "-q", "--filter", "label=" .. label,
+      })
+      local container_id = container_id_raw:match("^%s*(.-)%s*$")
+      if not container_id or container_id == "" then
+        return {}
+      end
+
+      -- Determine the directory to list and the prefix to filter by
+      local dir, prefix
+      if arglead == "" or arglead:sub(-1) == "/" then
+        dir = arglead == "" and "$HOME" or arglead
+        prefix = ""
+      else
+        local last_slash = arglead:match(".*/()")
+        if last_slash then
+          dir = arglead:sub(1, last_slash - 1)
+          prefix = arglead:sub(last_slash)
+        else
+          dir = "$HOME"
+          prefix = arglead
+        end
+      end
+
+      -- Resolve dir through container shell (handles $HOME, ~, $VAR, etc.)
+      local escaped_dir = dir:gsub("'", "'\\''")
+      local resolve_script = "printf '%%s' '" .. escaped_dir .. "'"
+      local resolved_dir_raw = vim.fn.system({
+        config.docker_command or "docker",
+        "exec", container_id, "/bin/sh", "-c", resolve_script,
+      })
+      local resolved_dir = resolved_dir_raw:gsub("%s+$", "")
+      if resolved_dir == "" then
+        resolved_dir = "/"
+      end
+
+      -- List the directory
+      local escaped_resolved = resolved_dir:gsub("'", "'\\''")
+      local ls_script = "ls -1a -- '" .. escaped_resolved .. "' 2>/dev/null"
+      local ls_raw = vim.fn.system({
+        config.docker_command or "docker",
+        "exec", container_id, "/bin/sh", "-c", ls_script,
+      })
+
+      local results = {}
+      local base = (dir == "$HOME" and arglead == "") and "" or (dir .. "/")
+      for line in ls_raw:gmatch("[^\n]+") do
+        if line ~= "." and line ~= ".." then
+          if prefix == "" or line:sub(1, #prefix) == prefix then
+            table.insert(results, base .. line)
+          end
+        end
+      end
+      return results
+    end
+
+    vim.api.nvim_create_user_command("DevcontainerCopyIn", function(args)
+      local fargs = args.fargs
+      if #fargs == 0 then
+        -- Prompt for both sides
+        vim.ui.input({ prompt = "Host source path: ", completion = "file" }, function(src)
+          if not src or src == "" then return end
+          vim.ui.input({ prompt = "Container destination path: " }, function(dest)
+            if not dest or dest == "" then return end
+            commands.copy_in({ src }, dest, { force = args.bang })
+          end)
+        end)
+      elseif #fargs == 1 then
+        vim.ui.input({ prompt = "Container destination path: " }, function(dest)
+          if not dest or dest == "" then return end
+          commands.copy_in(fargs, dest, { force = args.bang })
+        end)
+      else
+        local sources = { unpack(fargs, 1, #fargs - 1) }
+        local dest = fargs[#fargs]
+        commands.copy_in(sources, dest, { force = args.bang })
+      end
+    end, {
+      nargs = "*",
+      bang = true,
+      complete = "file",
+      desc = "Copy file(s)/director(ies) from host into the running devcontainer (scp semantics; last arg is dest). Bang skips overwrite prompt.",
+    })
+
+    vim.api.nvim_create_user_command("DevcontainerCopyOut", function(args)
+      local fargs = args.fargs
+      if #fargs == 0 then
+        vim.ui.input({ prompt = "Container source path: " }, function(src)
+          if not src or src == "" then return end
+          vim.ui.input({ prompt = "Host destination path: ", completion = "file" }, function(dest)
+            if not dest or dest == "" then return end
+            commands.copy_out({ src }, dest, { force = args.bang })
+          end)
+        end)
+      elseif #fargs == 1 then
+        vim.ui.input({ prompt = "Host destination path: ", completion = "file" }, function(dest)
+          if not dest or dest == "" then return end
+          commands.copy_out(fargs, dest, { force = args.bang })
+        end)
+      else
+        local sources = { unpack(fargs, 1, #fargs - 1) }
+        local dest = fargs[#fargs]
+        commands.copy_out(sources, dest, { force = args.bang })
+      end
+    end, {
+      nargs = "*",
+      bang = true,
+      complete = complete_container_path,
+      desc = "Copy file(s)/director(ies) from the running devcontainer to the host (scp semantics; last arg is dest). Bang skips overwrite prompt.",
+    })
   end
 
   if opts.autocommands then

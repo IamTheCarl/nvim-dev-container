@@ -183,4 +183,79 @@ describe("cli.up / cli.exec / cli.recreate arg construction", function()
     assert.is_not_nil(index_of(captured.args, "--remove-existing-container"))
     assert.is_not_nil(index_of(captured.args, "--expect-existing-container=false"))
   end)
+
+  it("cli.copy_to_container builds docker cp <host> <id>:<path>", function()
+    subject.copy_to_container("abc123", "/host/file.txt", "/workspace/file.txt", {})
+    assert.are.equal("docker", captured.cmd)
+    assert.are.equal("cp", captured.args[1])
+    assert.are.equal("/host/file.txt", captured.args[2])
+    assert.are.equal("abc123:/workspace/file.txt", captured.args[3])
+  end)
+
+  it("cli.copy_to_container adds -L when follow_link is set", function()
+    subject.copy_to_container("abc123", "/host/link", "/workspace/link", { follow_link = true })
+    assert.are.equal("-L", captured.args[2])
+    assert.are.equal("/host/link", captured.args[3])
+    assert.are.equal("abc123:/workspace/link", captured.args[4])
+  end)
+
+  it("cli.copy_from_container builds docker cp <id>:<path> <host>", function()
+    subject.copy_from_container("abc123", "/workspace/file.txt", "/host/dest/", {})
+    assert.are.equal("docker", captured.cmd)
+    assert.are.equal("cp", captured.args[1])
+    assert.are.equal("abc123:/workspace/file.txt", captured.args[2])
+    assert.are.equal("/host/dest/", captured.args[3])
+  end)
+
+  it("cli.copy_from_container adds -L when follow_link is set", function()
+    subject.copy_from_container("abc123", "/workspace/link", "/host/dest/", { follow_link = true })
+    assert.are.equal("-L", captured.args[2])
+    assert.are.equal("abc123:/workspace/link", captured.args[3])
+    assert.are.equal("/host/dest/", captured.args[4])
+  end)
+
+  it("cli.resolve_container_path runs printf via docker exec", function()
+    subject.resolve_container_path("abc123", "~/projects", function() end)
+    assert.are.equal("docker", captured.cmd)
+    assert.are.equal("exec", captured.args[1])
+    assert.are.equal("abc123", captured.args[2])
+    assert.are.equal("/bin/sh", captured.args[3])
+    assert.are.equal("-c", captured.args[4])
+    -- Script should contain printf and the path
+    assert.match("printf", captured.args[5])
+    assert.match("~/projects", captured.args[5])
+  end)
+
+  it("cli.resolve_container_path escapes single quotes in the path", function()
+    subject.resolve_container_path("abc123", "/foo/'bar'/baz", function() end)
+    -- Single quotes inside the path get escaped via POSIX '\'' technique
+    assert.match("'\\'", captured.args[5], 1, true)
+  end)
+
+  it("cli.stat_in_container runs [ -d ] / [ -e ] test script", function()
+    subject.stat_in_container("abc123", "/workspace/dir", function() end)
+    assert.are.equal("docker", captured.cmd)
+    assert.are.equal("exec", captured.args[1])
+    assert.are.equal("abc123", captured.args[2])
+    assert.match("%[ %-d", captured.args[5])
+    assert.match("%[ %-e", captured.args[5])
+  end)
+
+  it("cli.copy_to_container uses config.docker_command when set", function()
+    local cfg = require("devcontainer.config")
+    local orig = cfg.docker_command
+    cfg.docker_command = "podman"
+    subject.copy_to_container("abc123", "/a", "/b", {})
+    cfg.docker_command = orig
+    assert.are.equal("podman", captured.cmd)
+  end)
+
+  it("cli.copy_from_container uses config.docker_command when set", function()
+    local cfg = require("devcontainer.config")
+    local orig = cfg.docker_command
+    cfg.docker_command = "podman"
+    subject.copy_from_container("abc123", "/a", "/b", {})
+    cfg.docker_command = orig
+    assert.are.equal("podman", captured.cmd)
+  end)
 end)

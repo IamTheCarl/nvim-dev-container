@@ -560,6 +560,318 @@ function M.clear_cache()
   )
 end
 
+---Perform an overwrite check and optional confirmation, then run a docker cp.
+---@param container_id string
+---@param src_basename string basename of the source (for dir-inside-dir check)
+---@param resolved_dest string already-resolved container-side or host-side destination path
+---@param dest_is_container boolean true if dest is container-side
+---@param force boolean skip confirmation when true
+---@param do_copy fun() called if copy should proceed
+---@param callback fun(proceed: boolean)
+local function check_overwrite(container_id, src_basename, resolved_dest, dest_is_container, force, callback)
+  local function confirm(path)
+    if force then
+      callback(true)
+      return
+    end
+    vim.schedule(function()
+      vim.ui.select({ "Yes", "No" }, { prompt = "Overwrite " .. path .. "?" }, function(choice)
+        callback(choice == "Yes")
+      end)
+    end)
+  end
+
+  if dest_is_container then
+    cli.stat_in_container(container_id, resolved_dest, function(stat, _err)
+      if not stat or not stat.exists then
+        callback(true)
+        return
+      end
+      if stat.is_dir then
+        local combined = resolved_dest:gsub("/$", "") .. "/" .. src_basename
+        cli.stat_in_container(container_id, combined, function(inner_stat, _)
+          if inner_stat and inner_stat.exists then
+            confirm(combined)
+          else
+            callback(true)
+          end
+        end)
+      else
+        confirm(resolved_dest)
+      end
+    end)
+  else
+    -- Host-side stat
+    local stat = vim.loop.fs_stat(resolved_dest)
+    if not stat then
+      callback(true)
+      return
+    end
+    if stat.type == "directory" then
+      local combined = resolved_dest:gsub("/$", "") .. "/" .. src_basename
+      local inner = vim.loop.fs_stat(combined)
+      if inner then
+        confirm(combined)
+      else
+        callback(true)
+      end
+    else
+      confirm(resolved_dest)
+    end
+  end
+end
+
+---Copy one or more host files/directories into the running devcontainer.
+---Follows scp semantics: last positional arg is the destination; multiple
+---sources are allowed but require the destination to be a directory.
+---Container-side paths are shell-expanded (supports `~`, `$HOME`, etc.).
+---@param host_sources string[] source paths on the host (expanded via vim.fn.expand)
+---@param container_dest string destination path inside the container
+---@param opts? table
+---@field force? boolean skip overwrite confirmation (bang form)
+---@field follow_link? boolean follow symlinks on source (-L)
+function M.copy_in(host_sources, container_dest, opts)
+  opts = opts or {}
+  local force = opts.force or false
+  local follow_link = opts.follow_link or false
+
+  -- Expand host-side paths
+  local expanded_sources = {}
+  for _, src in ipairs(host_sources) do
+    table.insert(expanded_sources, vim.fn.expand(src))
+  end
+
+  find_nearest_config(
+    plugin_config.config_search_start() or vim.loop.cwd(),
+    function(config_path, config_dir)
+      if not config_path then
+        vim.notify("No devcontainer.json found in workspace", vim.log.levels.ERROR)
+        return
+      end
+
+      local workspace_folder = vim.fn.fnamemodify(config_dir, ":h") or vim.loop.cwd()
+
+      cli.find_container(nil, workspace_folder, config_path, function(container_id)
+        -- Validate all sources exist on host
+        for _, src in ipairs(expanded_sources) do
+          if not vim.loop.fs_stat(src) then
+            vim.notify("Source does not exist: " .. src, vim.log.levels.ERROR)
+            return
+          end
+        end
+
+        -- Resolve container destination through in-container shell
+        cli.resolve_container_path(container_id, container_dest, function(resolved_dest, err)
+          if not resolved_dest then
+            vim.notify("Failed to resolve container path: " .. (err or "unknown error"), vim.log.levels.ERROR)
+            return
+          end
+
+          -- For multiple sources the destination must be a directory
+          if #expanded_sources > 1 then
+            cli.stat_in_container(container_id, resolved_dest, function(stat, _)
+              if not (stat and stat.is_dir) then
+                vim.notify(
+                  "Destination must be an existing directory when copying multiple sources",
+                  vim.log.levels.ERROR
+                )
+                return
+              end
+              -- Copy each source sequentially
+              local i = 0
+              local results = {}
+              local function copy_next()
+                i = i + 1
+                if i > #expanded_sources then
+                  local failed = 0
+                  for _, r in ipairs(results) do
+                    if r ~= 0 then
+                      failed = failed + 1
+                    end
+                  end
+                  if failed == 0 then
+                    vim.notify(
+                      "Copied " .. #expanded_sources .. " item(s) into container " .. container_id
+                    )
+                  else
+                    vim.notify(
+                      tostring(failed) .. " of " .. #expanded_sources .. " copy operation(s) failed",
+                      vim.log.levels.WARN
+                    )
+                  end
+                  return
+                end
+                local src = expanded_sources[i]
+                local basename = src:match("[^/]+$") or src
+                check_overwrite(container_id, basename, resolved_dest, true, force, function(proceed)
+                  if not proceed then
+                    vim.notify("Skipped: " .. src)
+                    table.insert(results, 0)
+                    copy_next()
+                    return
+                  end
+                  cli.copy_to_container(container_id, src, resolved_dest, {
+                    follow_link = follow_link,
+                    on_exit = function(result)
+                      table.insert(results, result.code)
+                      if result.code ~= 0 then
+                        vim.notify("Failed to copy " .. src .. ": " .. result.stderr, vim.log.levels.ERROR)
+                      end
+                      copy_next()
+                    end,
+                  })
+                end)
+              end
+              copy_next()
+            end)
+          else
+            -- Single source
+            local src = expanded_sources[1]
+            local basename = src:match("[^/]+$") or src
+            check_overwrite(container_id, basename, resolved_dest, true, force, function(proceed)
+              if not proceed then
+                vim.notify("Copy cancelled.")
+                return
+              end
+              cli.copy_to_container(container_id, src, resolved_dest, {
+                follow_link = follow_link,
+                on_exit = function(result)
+                  if result.code == 0 then
+                    vim.notify("Copied " .. src .. " into container " .. container_id)
+                  else
+                    vim.notify("Copy failed: " .. result.stderr, vim.log.levels.ERROR)
+                  end
+                end,
+              })
+            end)
+          end
+        end)
+      end, function(err)
+        vim.notify("No running devcontainer found: " .. err, vim.log.levels.ERROR)
+      end)
+    end
+  )
+end
+
+---Copy one or more files/directories out of the running devcontainer to the host.
+---Follows scp semantics: last positional arg is the destination; multiple
+---sources are allowed but require the destination to be an existing directory.
+---Container-side paths are shell-expanded (supports `~`, `$HOME`, etc.).
+---@param container_sources string[] source paths inside the container
+---@param host_dest string destination path on the host (expanded via vim.fn.expand)
+---@param opts? table
+---@field force? boolean skip overwrite confirmation (bang form)
+---@field follow_link? boolean follow symlinks on source (-L)
+function M.copy_out(container_sources, host_dest, opts)
+  opts = opts or {}
+  local force = opts.force or false
+  local follow_link = opts.follow_link or false
+  local expanded_host_dest = vim.fn.expand(host_dest)
+
+  find_nearest_config(
+    plugin_config.config_search_start() or vim.loop.cwd(),
+    function(config_path, config_dir)
+      if not config_path then
+        vim.notify("No devcontainer.json found in workspace", vim.log.levels.ERROR)
+        return
+      end
+
+      local workspace_folder = vim.fn.fnamemodify(config_dir, ":h") or vim.loop.cwd()
+
+      cli.find_container(nil, workspace_folder, config_path, function(container_id)
+        -- Resolve all container sources
+        local resolved_sources = {}
+        local pending = #container_sources
+
+        local function on_all_resolved()
+          -- For multiple sources the host destination must be a directory
+          if #resolved_sources > 1 then
+            local dest_stat = vim.loop.fs_stat(expanded_host_dest)
+            if not (dest_stat and dest_stat.type == "directory") then
+              vim.notify(
+                "Destination must be an existing directory when copying multiple sources",
+                vim.log.levels.ERROR
+              )
+              return
+            end
+          end
+
+          local i = 0
+          local results = {}
+          local function copy_next()
+            i = i + 1
+            if i > #resolved_sources then
+              local failed = 0
+              for _, r in ipairs(results) do
+                if r ~= 0 then
+                  failed = failed + 1
+                end
+              end
+              if failed == 0 then
+                vim.notify(
+                  "Copied " .. #resolved_sources .. " item(s) from container " .. container_id
+                )
+              else
+                vim.notify(
+                  tostring(failed) .. " of " .. #resolved_sources .. " copy operation(s) failed",
+                  vim.log.levels.WARN
+                )
+              end
+              return
+            end
+
+            local rsrc = resolved_sources[i]
+            local basename = rsrc:match("[^/]+$") or rsrc
+            check_overwrite(container_id, basename, expanded_host_dest, false, force, function(proceed)
+              if not proceed then
+                vim.notify("Skipped: " .. rsrc)
+                table.insert(results, 0)
+                copy_next()
+                return
+              end
+              cli.copy_from_container(container_id, rsrc, expanded_host_dest, {
+                follow_link = follow_link,
+                on_exit = function(result)
+                  table.insert(results, result.code)
+                  if result.code ~= 0 then
+                    vim.notify("Failed to copy " .. rsrc .. ": " .. result.stderr, vim.log.levels.ERROR)
+                  end
+                  copy_next()
+                end,
+              })
+            end)
+          end
+          copy_next()
+        end
+
+        -- Resolve each source path sequentially, collecting results
+        local resolve_idx = 0
+        local function resolve_next()
+          resolve_idx = resolve_idx + 1
+          if resolve_idx > #container_sources then
+            on_all_resolved()
+            return
+          end
+          cli.resolve_container_path(container_id, container_sources[resolve_idx], function(resolved, err)
+            if not resolved then
+              vim.notify(
+                "Failed to resolve container path '" .. container_sources[resolve_idx] .. "': " .. (err or ""),
+                vim.log.levels.ERROR
+              )
+              return
+            end
+            table.insert(resolved_sources, resolved)
+            resolve_next()
+          end)
+        end
+        resolve_next()
+      end, function(err)
+        vim.notify("No running devcontainer found: " .. err, vim.log.levels.ERROR)
+      end)
+    end
+  )
+end
+
 ---Open or create nearest devcontainer.json config
 function M.edit_config()
   find_nearest_config(

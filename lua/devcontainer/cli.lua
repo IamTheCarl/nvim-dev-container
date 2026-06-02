@@ -486,6 +486,262 @@ function M.find_container(container_id, workspace_folder, config_path, on_succes
   })
 end
 
+---Resolve a container-side path through the container's shell.
+---Handles `~`, `$HOME`, `$VAR`, `${VAR}`, mid-path variables, etc.
+---The path is always run through `printf "%s" '<path>'` inside the container;
+---single quotes in the path are escaped via the POSIX `'\''` technique.
+---@param container_id string
+---@param path string container-side path (may contain shell variables)
+---@param callback fun(resolved: string|nil, err: string|nil)
+function M.resolve_container_path(container_id, path, callback)
+  -- POSIX single-quote escape: wrap in single quotes, escaping any ' as '\''
+  local escaped = path:gsub("'", "'\\''")
+  local script = "printf '%%s' '" .. escaped .. "'"
+  local stdout_buf = {}
+  local stderr_buf = {}
+  local stdout_pipe = uv.new_pipe(false)
+  local stderr_pipe = uv.new_pipe(false)
+
+  local handle
+  handle = uv.spawn(
+    config.docker_command or "docker",
+    {
+      stdio = { nil, stdout_pipe, stderr_pipe },
+      args = { "exec", container_id, "/bin/sh", "-c", script },
+    },
+    function(code, _signal)
+      handle_close(stdout_pipe)
+      handle_close(stderr_pipe)
+      handle_close(handle)
+      local resolved = table.concat(stdout_buf):gsub("%s+$", "")
+      if code == 0 and resolved ~= "" then
+        vim.schedule(function()
+          callback(resolved, nil)
+        end)
+      else
+        local err = table.concat(stderr_buf)
+        vim.schedule(function()
+          callback(nil, "Failed to resolve container path '" .. path .. "': " .. err)
+        end)
+      end
+    end
+  )
+  uv.read_start(stdout_pipe, function(_, data)
+    if data then
+      table.insert(stdout_buf, data)
+    end
+  end)
+  uv.read_start(stderr_pipe, function(_, data)
+    if data then
+      table.insert(stderr_buf, data)
+    end
+  end)
+end
+
+---Stat a path inside a container.
+---@param container_id string
+---@param path string already-resolved absolute container path
+---@param callback fun(stat: {exists: boolean, is_dir: boolean}|nil, err: string|nil)
+function M.stat_in_container(container_id, path, callback)
+  local escaped = path:gsub("'", "'\\''")
+  local script = "if [ -d '" .. escaped .. "' ]; then echo d; elif [ -e '" .. escaped .. "' ]; then echo f; fi"
+  local stdout_buf = {}
+  local stderr_buf = {}
+  local stdout_pipe = uv.new_pipe(false)
+  local stderr_pipe = uv.new_pipe(false)
+
+  local handle
+  handle = uv.spawn(
+    config.docker_command or "docker",
+    {
+      stdio = { nil, stdout_pipe, stderr_pipe },
+      args = { "exec", container_id, "/bin/sh", "-c", script },
+    },
+    function(code, _signal)
+      handle_close(stdout_pipe)
+      handle_close(stderr_pipe)
+      handle_close(handle)
+      local out = table.concat(stdout_buf):gsub("%s+$", "")
+      if code == 0 then
+        vim.schedule(function()
+          callback({ exists = out ~= "", is_dir = out == "d" }, nil)
+        end)
+      else
+        local err = table.concat(stderr_buf)
+        vim.schedule(function()
+          callback(nil, "Failed to stat container path '" .. path .. "': " .. err)
+        end)
+      end
+    end
+  )
+  uv.read_start(stdout_pipe, function(_, data)
+    if data then
+      table.insert(stdout_buf, data)
+    end
+  end)
+  uv.read_start(stderr_pipe, function(_, data)
+    if data then
+      table.insert(stderr_buf, data)
+    end
+  end)
+end
+
+---List entries of a directory inside a container (for tab completion).
+---@param container_id string
+---@param dir string already-resolved absolute container directory path
+---@param callback fun(entries: string[]|nil, err: string|nil)
+function M.list_container_dir(container_id, dir, callback)
+  local escaped = dir:gsub("'", "'\\''")
+  local script = "ls -1a -- '" .. escaped .. "' 2>/dev/null"
+  local stdout_buf = {}
+  local stdout_pipe = uv.new_pipe(false)
+  local stderr_pipe = uv.new_pipe(false)
+
+  local handle
+  handle = uv.spawn(
+    config.docker_command or "docker",
+    {
+      stdio = { nil, stdout_pipe, stderr_pipe },
+      args = { "exec", container_id, "/bin/sh", "-c", script },
+    },
+    function(code, _signal)
+      handle_close(stdout_pipe)
+      handle_close(stderr_pipe)
+      handle_close(handle)
+      if code == 0 then
+        local raw = table.concat(stdout_buf)
+        local entries = {}
+        for line in raw:gmatch("[^\n]+") do
+          if line ~= "." and line ~= ".." then
+            table.insert(entries, line)
+          end
+        end
+        vim.schedule(function()
+          callback(entries, nil)
+        end)
+      else
+        vim.schedule(function()
+          callback(nil, "Failed to list container directory '" .. dir .. "'")
+        end)
+      end
+    end
+  )
+  uv.read_start(stdout_pipe, function(_, data)
+    if data then
+      table.insert(stdout_buf, data)
+    end
+  end)
+  uv.read_start(stderr_pipe, function(_, data)
+    -- consume stderr (suppressed via 2>/dev/null in script)
+  end)
+end
+
+---Copy a file or directory from the host into a running container.
+---@param container_id string
+---@param host_path string source path on the host
+---@param container_path string destination path inside the container (already resolved)
+---@param opts? table
+---@field follow_link? boolean pass -L to docker cp (follow symlinks on source)
+---@field on_exit? fun(result: {code: integer, stdout: string, stderr: string})
+function M.copy_to_container(container_id, host_path, container_path, opts)
+  opts = opts or {}
+  local args = { "cp" }
+  if opts.follow_link then
+    table.insert(args, "-L")
+  end
+  vim.list_extend(args, { host_path, container_id .. ":" .. container_path })
+
+  local stdout_buf = {}
+  local stderr_buf = {}
+  local stdout_pipe = uv.new_pipe(false)
+  local stderr_pipe = uv.new_pipe(false)
+
+  local handle
+  handle = uv.spawn(
+    config.docker_command or "docker",
+    { stdio = { nil, stdout_pipe, stderr_pipe }, args = args },
+    function(code, signal)
+      handle_close(stdout_pipe)
+      handle_close(stderr_pipe)
+      handle_close(handle)
+      local result = {
+        code = code,
+        signal = signal,
+        stdout = table.concat(stdout_buf),
+        stderr = table.concat(stderr_buf),
+      }
+      if type(opts.on_exit) == "function" then
+        vim.schedule(function()
+          opts.on_exit(result)
+        end)
+      end
+    end
+  )
+  uv.read_start(stdout_pipe, function(_, data)
+    if data then
+      table.insert(stdout_buf, data)
+    end
+  end)
+  uv.read_start(stderr_pipe, function(_, data)
+    if data then
+      table.insert(stderr_buf, data)
+    end
+  end)
+end
+
+---Copy a file or directory from a running container to the host.
+---@param container_id string
+---@param container_path string source path inside the container (already resolved)
+---@param host_path string destination path on the host
+---@param opts? table
+---@field follow_link? boolean pass -L to docker cp (follow symlinks on source)
+---@field on_exit? fun(result: {code: integer, stdout: string, stderr: string})
+function M.copy_from_container(container_id, container_path, host_path, opts)
+  opts = opts or {}
+  local args = { "cp" }
+  if opts.follow_link then
+    table.insert(args, "-L")
+  end
+  vim.list_extend(args, { container_id .. ":" .. container_path, host_path })
+
+  local stdout_buf = {}
+  local stderr_buf = {}
+  local stdout_pipe = uv.new_pipe(false)
+  local stderr_pipe = uv.new_pipe(false)
+
+  local handle
+  handle = uv.spawn(
+    config.docker_command or "docker",
+    { stdio = { nil, stdout_pipe, stderr_pipe }, args = args },
+    function(code, signal)
+      handle_close(stdout_pipe)
+      handle_close(stderr_pipe)
+      handle_close(handle)
+      local result = {
+        code = code,
+        signal = signal,
+        stdout = table.concat(stdout_buf),
+        stderr = table.concat(stderr_buf),
+      }
+      if type(opts.on_exit) == "function" then
+        vim.schedule(function()
+          opts.on_exit(result)
+        end)
+      end
+    end
+  )
+  uv.read_start(stdout_pipe, function(_, data)
+    if data then
+      table.insert(stdout_buf, data)
+    end
+  end)
+  uv.read_start(stderr_pipe, function(_, data)
+    if data then
+      table.insert(stderr_buf, data)
+    end
+  end)
+end
+
 log.wrap(M)
 
 -- Internal exports for testing only. Not part of the public API.
