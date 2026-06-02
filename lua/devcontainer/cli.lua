@@ -548,15 +548,21 @@ end
 
 ---Resolve a container-side path through the container's shell.
 ---Handles `~`, `$HOME`, `$VAR`, `${VAR}`, mid-path variables, etc.
----The path is always run through `printf "%s" '<path>'` inside the container;
----single quotes in the path are escaped via the POSIX `'\''` technique.
+---Leading `~` is normalised to `$HOME` before evaluation so that it expands
+---correctly inside a double-quoted `printf` (tilde only expands when
+---unquoted, but `$HOME` expands in double quotes).
+---Double-quote characters in the path are escaped to prevent injection.
 ---@param container_id string
 ---@param path string container-side path (may contain shell variables)
 ---@param callback fun(resolved: string|nil, err: string|nil)
 function M.resolve_container_path(container_id, path, callback)
-  -- POSIX single-quote escape: wrap in single quotes, escaping any ' as '\''
-  local escaped = path:gsub("'", "'\\''")
-  local script = "printf '%%s' '" .. escaped .. "'"
+  -- Normalise leading ~ / ~/ → $HOME / $HOME/ so the shell expands it in
+  -- a double-quoted context.  Only the unambiguous home-dir shorthand is
+  -- touched; ~user/ forms are left as-is (rare in devcontainer paths).
+  local normalized = path:gsub("^~([/])", "$HOME%1"):gsub("^~$", "$HOME")
+  -- Escape any double-quote characters to prevent injection.
+  local dq_escaped = normalized:gsub('"', '\\"')
+  local script = 'printf "%s" "' .. dq_escaped .. '"'
   local stdout_buf = {}
   local stderr_buf = {}
   local stdout_pipe = uv.new_pipe(false)
