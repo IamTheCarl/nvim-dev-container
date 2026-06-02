@@ -258,4 +258,33 @@ describe("cli.up / cli.exec / cli.recreate arg construction", function()
     cfg.docker_command = orig
     assert.are.equal("podman", captured.cmd)
   end)
+
+  it("cli.get_remote_shell builds getent/grep script for named user", function()
+    subject.get_remote_shell("abc123", "devuser", function() end)
+    assert.are.equal("docker", captured.cmd)
+    assert.are.equal("exec", captured.args[1])
+    assert.are.equal("abc123", captured.args[2])
+    assert.are.equal("/bin/sh", captured.args[3])
+    assert.are.equal("-c", captured.args[4])
+    assert.match("getent passwd", captured.args[5])
+    assert.match("devuser", captured.args[5])
+    assert.match("cut %-d: %-f7", captured.args[5])
+  end)
+
+  it("cli.get_remote_shell uses uid-based lookup when remote_user is nil", function()
+    subject.get_remote_shell("abc123", nil, function() end)
+    assert.match("id %-u", captured.args[5])
+    assert.match("cut %-d: %-f7", captured.args[5])
+    -- No hardcoded username should appear
+    assert.is_nil(captured.args[5]:match("getent passwd '[^$]"))
+  end)
+
+  it("cli.get_remote_shell uses config.docker_command", function()
+    local cfg = require("devcontainer.config")
+    local orig = cfg.docker_command
+    cfg.docker_command = "podman"
+    subject.get_remote_shell("abc123", "user", function() end)
+    cfg.docker_command = orig
+    assert.are.equal("podman", captured.cmd)
+  end)
 end)

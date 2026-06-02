@@ -486,6 +486,64 @@ function M.find_container(container_id, workspace_folder, config_path, on_succes
   })
 end
 
+---Detect the login shell for the container's remote user by reading /etc/passwd.
+---Mirrors what VSCode does: tries `getent passwd <user>` first, falls back to
+---`grep /etc/passwd`, falls back to `/bin/sh`.
+---When remote_user is nil, resolves by the current uid (`getent passwd $(id -u)`).
+---@param container_id string
+---@param remote_user string|nil username from devcontainer.json remoteUser field
+---@param callback fun(shell: string) always called; never nil (worst-case "/bin/sh")
+function M.get_remote_shell(container_id, remote_user, callback)
+  local script
+  if remote_user then
+    -- Escape single quotes in username (unlikely but safe)
+    local user = remote_user:gsub("'", "'\\''")
+    script = "(command -v getent >/dev/null 2>&1 && getent passwd '" .. user .. "'"
+      .. " || grep -E '^" .. user .. ":' /etc/passwd || true)"
+      .. " | cut -d: -f7 | head -1"
+  else
+    script = "(command -v getent >/dev/null 2>&1 && getent passwd $(id -u)"
+      .. " || grep -E '^[^:]*:[^:]*:'$(id -u)':' /etc/passwd || true)"
+      .. " | cut -d: -f7 | head -1"
+  end
+
+  local stdout_buf = {}
+  local stderr_buf = {}
+  local stdout_pipe = uv.new_pipe(false)
+  local stderr_pipe = uv.new_pipe(false)
+
+  local handle
+  handle = uv.spawn(
+    config.docker_command or "docker",
+    {
+      stdio = { nil, stdout_pipe, stderr_pipe },
+      args = { "exec", container_id, "/bin/sh", "-c", script },
+    },
+    function(code, _signal)
+      handle_close(stdout_pipe)
+      handle_close(stderr_pipe)
+      handle_close(handle)
+      local shell = vim.trim(table.concat(stdout_buf))
+      if code ~= 0 or shell == "" then
+        shell = "/bin/sh"
+      end
+      vim.schedule(function()
+        callback(shell)
+      end)
+    end
+  )
+  uv.read_start(stdout_pipe, function(_, data)
+    if data then
+      table.insert(stdout_buf, data)
+    end
+  end)
+  uv.read_start(stderr_pipe, function(_, data)
+    if data then
+      table.insert(stderr_buf, data)
+    end
+  end)
+end
+
 ---Resolve a container-side path through the container's shell.
 ---Handles `~`, `$HOME`, `$VAR`, `${VAR}`, mid-path variables, etc.
 ---The path is always run through `printf "%s" '<path>'` inside the container;

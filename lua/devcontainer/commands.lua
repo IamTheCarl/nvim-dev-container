@@ -139,23 +139,21 @@ local function attach_to_container(container_id, config_path, config, command, o
         end
       end
 
-      -- Launch headless nvim in the container, bound to 0.0.0.0:<port>.
-      -- Reachable from the host via the container's docker-bridge IP.
-      -- No authentication; acceptable for local-dev usage only.
-      --
-      -- AppRun sets VIMRUNTIME / LD_LIBRARY_PATH and execs nvim directly
-      -- (no user-namespace chroot), so child processes spawned by :terminal,
-      -- :!cmd, and LSP servers can reach the container's native /usr/bin,
-      -- /bin, /lib, etc. — i.e. normal devcontainer semantics.
-      -- Change into the workspace directory before launching nvim so the
-      -- server's cwd matches the project root. Falls back to the image's
-      -- WORKDIR when workspaceFolder is not set in devcontainer.json.
-      local workspace_dir = config and config.workspaceFolder
-      local cd_prefix = workspace_dir and ("cd " .. vim.fn.shellescape(workspace_dir) .. " && ") or ""
-      local launch_script = cd_prefix .. "nohup " .. install_dir .. "/app/AppRun --headless"
-        .. " --listen 0.0.0.0:" .. tostring(port)
-        .. " >/dev/null 2>&1 &"
-      cli.exec(container_id, "/bin/sh", { "-c", launch_script }, {
+      -- Determine the shell to use for &shell in the container-side nvim.
+      -- Option C: explicit override via nvim_shell config.
+      -- Option B: auto-detect from container's /etc/passwd for remoteUser.
+      local function launch_with_shell(shell)
+        remote_env["SHELL"] = shell
+
+        -- Change into the workspace directory before launching nvim so the
+        -- server's cwd matches the project root. Falls back to the image's
+        -- WORKDIR when workspaceFolder is not set in devcontainer.json.
+        local workspace_dir = config and config.workspaceFolder
+        local cd_prefix = workspace_dir and ("cd " .. vim.fn.shellescape(workspace_dir) .. " && ") or ""
+        local launch_script = cd_prefix .. "nohup " .. install_dir .. "/app/AppRun --headless"
+          .. " --listen 0.0.0.0:" .. tostring(port)
+          .. " >/dev/null 2>&1 &"
+        cli.exec(container_id, "/bin/sh", { "-c", launch_script }, {
         remote_env = remote_env,
         on_exit = sched(function(result)
           if result.code ~= 0 then
@@ -207,6 +205,15 @@ local function attach_to_container(container_id, config_path, config, command, o
           end
         end),
       })
+      end -- launch_with_shell
+
+      -- Dispatch: use explicit override (Option C) or auto-detect (Option B).
+      if plugin_config.nvim_shell then
+        launch_with_shell(plugin_config.nvim_shell)
+      else
+        local remote_user = config and config.remoteUser
+        cli.get_remote_shell(container_id, remote_user, launch_with_shell)
+      end
     else
       local remote_env = {}
       if plugin_config.remote_env then

@@ -142,6 +142,10 @@ require("devcontainer").setup({
   docker_command = "docker", -- override to "podman" etc.
   cli_path = nil,            -- absolute path to devcontainer CLI; nil = PATH lookup
   remote_env = {},           -- forwarded to `devcontainer exec` as --remote-env
+  nvim_shell = nil,          -- shell for &shell in the container-side nvim;
+                             -- nil = auto-detect from container's /etc/passwd
+                             -- (mirrors VSCode: SHELL env > login shell > /bin/sh)
+                             -- set to "/bin/bash" to skip detection round-trip
 
   -- Misc
   generate_commands = true,

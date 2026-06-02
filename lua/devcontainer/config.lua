@@ -113,4 +113,11 @@ M.remote_env = {}
 ---@type string|nil
 M.cli_path = nil
 
+---Shell to use inside the container for Neovim's &shell option.
+---When nil (default), the login shell is auto-detected from the container's
+---/etc/passwd for the remoteUser (or the current uid if remoteUser is not set).
+---Set to an explicit path (e.g. "/bin/bash") to skip the detection round-trip.
+---@type string|nil
+M.nvim_shell = nil
+
 return M

@@ -30,6 +30,7 @@ local configured = false
 ---@field remote_env? table can be used to override remoteEnv when attaching to containers
 ---@field disable_recursive_config_search? boolean can be used to disable recursive .devcontainer search
 ---@field cli_path? string path to devcontainer CLI executable (useful for Nix installations)
+---@field nvim_shell? string shell to use inside the container for &shell (nil = auto-detect from /etc/passwd)
 
 ---Starts the plugin and sets it up with provided options
 ---@param opts? DevcontainerSetupOpts
@@ -65,6 +66,9 @@ function M.setup(opts)
     cli_path = function(t)
       return t == nil or type(t) == "string"
     end,
+    nvim_shell = function(t)
+      return t == nil or type(t) == "string"
+    end,
   })
 
   if opts.autocommands then
@@ -96,6 +100,10 @@ function M.setup(opts)
   if opts.cli_path then
     config.cli_path = opts.cli_path
     log.info("Using devcontainer CLI from: " .. opts.cli_path)
+  end
+
+  if opts.nvim_shell ~= nil then
+    config.nvim_shell = opts.nvim_shell
   end
 
   if opts.generate_commands ~= false then
