@@ -21,8 +21,12 @@ custom Docker/Podman/compose orchestration.
 - Neovim 0.12.0+ (uses the built-in `:connect` remote UI client).
 - The [`@devcontainers/cli`][cli] binary on `PATH` (or pass `cli_path`).
 - A container runtime the CLI can drive (Docker or Podman).
-- `nix` on `PATH` on the host — used by the installer to produce an AppImage of
-  the configured Neovim that gets streamed into the container.
+- **Nix on `PATH` on the host** (flake or non-flake setup).
+  - Used by the installer to produce an AppImage of the configured Neovim
+    closure, which is then streamed into the container.
+  - If Nix is not installed, install it from https://nixos.org/download.
+  - Nix can be installed on any Linux distribution or macOS (even if not
+    running NixOS).
 - For projects with local-path features that live outside the workspace's
   `.devcontainer/` folder, a CLI build that resolves feature parent paths from
   the config file's directory rather than `<workspace>/.devcontainer`.
@@ -40,9 +44,19 @@ beyond Neovim itself.
 
 ```lua
 require("devcontainer").setup({
-  -- Optional. Flake reference passed to `nix bundle` to produce the Neovim
-  -- that gets installed into the container. Defaults to `nixpkgs#neovim`.
-  -- nvim_nix_attribute = "github:me/dotfiles#neovim",
+  -- Optional. Nix expression for the Neovim closure to bundle into an
+  -- AppImage. Defaults to `nixpkgs#neovim`.
+  --
+  -- This can be a flake reference (with or without flakes enabled):
+  --   nvim_nix_attribute = "nixpkgs#neovim",
+  --   nvim_nix_attribute = "github:me/dotfiles#neovim",
+  --
+  -- Or a non-flake Nix expression (e.g., from a NixOS module, overlays,
+  -- or legacy packages). Examples:
+  --   nvim_nix_attribute = "(import <nixpkgs> {}).neovim",
+  --   nvim_nix_attribute = "let pkgs = import <nixpkgs> {}; in pkgs.neovim",
+  --
+  -- nvim_nix_attribute = "nixpkgs#neovim",
 })
 ```
 
@@ -134,7 +148,7 @@ require("devcontainer").setup({
   devcontainer_json_template = function() --[[ returns a list of lines ]] end,
 
   -- Neovim installer
-  nvim_nix_attribute = "nixpkgs#neovim", -- flake ref consumed by `nix bundle`
+  nvim_nix_attribute = "nixpkgs#neovim", -- Nix expression (flake or non-flake)
   nvim_install_dir = "$HOME/.nvim-devcontainer", -- inside the container
   nvim_cache_versions = 3, -- on-host AppImage cache retention
 
@@ -161,6 +175,8 @@ require("devcontainer").setup({
 
 ## Architecture
 
+### File Structure
+
 ```
 lua/devcontainer/
   cli.lua        -- thin wrapper around @devcontainers/cli (up/exec/recreate/read-config/find-container)
@@ -174,6 +190,33 @@ lua/devcontainer/
     installer.lua -- nix-bundle host-side cache + chunked stream into container
     nvim.lua      -- is_installed probe; add_neovim delegates to installer
 ```
+
+### Why Nix?
+
+The plugin uses Nix to produce a **self-contained Neovim AppImage**, which is then
+streamed into the container. This approach has several advantages:
+
+1. **Container Isolation:** The Neovim closure (including all runtime dependencies,
+   plugins, configurations) is bundled into a single AppImage. This is independent
+   of the container's base image, so Neovim works identically whether the container
+   is Alpine, Ubuntu, CentOS, or anything else.
+
+2. **No Version Mismatch:** Users' Neovim configuration and plugins are evaluated in
+   their host environment (with their nixpkgs version, overlays, etc.), not inside
+   the container. This ensures consistent behavior.
+
+3. **Reproducibility:** Nix's declarative package management means the Neovim binary
+   and all dependencies are pinned and reproducible.
+
+4. **Flexible Input:** The `nvim_nix_attribute` parameter accepts any valid Nix
+   expression passed to `nix bundle` and `nix eval`, including:
+   - **Flake references:** `github:me/dotfiles#neovim`, `nixpkgs#neovim` (works with
+     or without flakes enabled on the system)
+   - **Legacy expressions:** `(import <nixpkgs> {}).neovim`, custom derivations from
+     NixOS modules, overlays, etc.
+
+   This flexibility supports diverse setups and Nix workflows, whether or not you
+   use flakes.
 
 ## Testing
 
