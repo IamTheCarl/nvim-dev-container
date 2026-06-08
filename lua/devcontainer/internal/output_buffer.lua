@@ -151,9 +151,11 @@ function OutputBuffer:append(text, type)
     if #lines > 0 then
       -- Decode JSON log lines if this is stdout from devcontainer CLI
       if captured_type == "stdout" then
+        local decoded_lines = {}
         for i, line in ipairs(lines) do
-          lines[i] = decode_json_log(line)
+          decoded_lines[i] = decode_json_log(line)
         end
+        lines = decoded_lines
       end
 
       vim.api.nvim_buf_set_option(self.bufnr, "modifiable", true)
