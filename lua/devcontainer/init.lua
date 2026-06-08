@@ -150,6 +150,65 @@ function M.setup(opts)
       desc = "Attach to devcontainer using devcontainer CLI",
     })
 
+    vim.api.nvim_create_user_command("DevcontainerBuild", function(args)
+      -- Parse arguments: [--no-cache] [-- <extra_devcontainer_args>]
+      local no_cache = false
+      local extra_cli_args = {}
+      local delimiter_index = nil
+
+      for i, arg in ipairs(args.fargs) do
+        if arg == "--" then
+          delimiter_index = i
+          break
+        elseif arg == "--no-cache" then
+          no_cache = true
+        end
+      end
+
+      if delimiter_index then
+        -- Collect args after --
+        for i = delimiter_index + 1, #args.fargs do
+          table.insert(extra_cli_args, args.fargs[i])
+        end
+      end
+
+      commands.build({
+        no_cache = no_cache,
+        extra_cli_args = #extra_cli_args > 0 and extra_cli_args or nil,
+      })
+    end, {
+      nargs = "*",
+      desc = "Build the devcontainer image",
+    })
+
+    vim.api.nvim_create_user_command("DevcontainerRebuild", function(args)
+      -- Parse arguments: [-- <extra_devcontainer_args>]
+      local extra_cli_args = {}
+      local delimiter_index = nil
+
+      for i, arg in ipairs(args.fargs) do
+        if arg == "--" then
+          delimiter_index = i
+          break
+        end
+      end
+
+      if delimiter_index then
+        -- Collect args after --
+        for i = delimiter_index + 1, #args.fargs do
+          table.insert(extra_cli_args, args.fargs[i])
+        end
+      end
+
+      commands.build({
+        no_cache = true,
+        extra_cli_args = #extra_cli_args > 0 and extra_cli_args or nil,
+      })
+    end, {
+      nargs = "*",
+      desc = "Rebuild the devcontainer image (skip cache)",
+    })
+
     vim.api.nvim_create_user_command("DevcontainerStop", function(_)
       commands.stop()
     end, {

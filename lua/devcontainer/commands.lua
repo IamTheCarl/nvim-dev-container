@@ -120,8 +120,9 @@ end
 ---@param config table parsed devcontainer.json data from CLI
 ---@param command string|table command to run (default: "nvim")
 ---@param extra_cli_args? string[] additional devcontainer CLI arguments to pass through
+---@param output_buf? table output buffer for displaying progress
 ---@param on_success? function callback with config data
-local function attach_to_container(container_id, config_path, config, command, extra_cli_args, on_success)
+local function attach_to_container(container_id, config_path, config, command, extra_cli_args, output_buf, on_success)
   command = command or "nvim"
 
   local function do_attach()
@@ -165,8 +166,16 @@ local function attach_to_container(container_id, config_path, config, command, e
         extra_cli_args = extra_cli_args,
         on_exit = sched(function(result)
           if result.code ~= 0 then
+            if output_buf then
+              output_buf:append("Failed to start Neovim in container: " .. (result.stderr or "unknown error"), "stderr")
+              output_buf:finalize("error")
+            end
             vim.notify("Failed to start Neovim in container: " .. (result.stderr or "unknown error"), vim.log.levels.ERROR)
             return
+          end
+
+          if output_buf then
+            output_buf:append_progress("Neovim started, connecting...")
           end
 
           -- Resolve the container's IP on the docker bridge network.
@@ -176,11 +185,19 @@ local function attach_to_container(container_id, config_path, config, command, e
             container_id,
           }, { text = true }):wait()
           if inspect.code ~= 0 then
+            if output_buf then
+              output_buf:append("docker inspect failed: " .. (inspect.stderr or "unknown"), "stderr")
+              output_buf:finalize("error")
+            end
             vim.notify("docker inspect failed: " .. (inspect.stderr or "unknown"), vim.log.levels.ERROR)
             return
           end
           local ip = vim.trim(inspect.stdout or "")
           if ip == "" then
+            if output_buf then
+              output_buf:append("Could not resolve container IP for " .. container_id, "stderr")
+              output_buf:finalize("error")
+            end
             vim.notify("Could not resolve container IP for " .. container_id, vim.log.levels.ERROR)
             return
           end
@@ -194,8 +211,16 @@ local function attach_to_container(container_id, config_path, config, command, e
             vim.defer_fn(function()
               local ok, cerr = pcall(vim.cmd, "connect " .. target)
               if not ok then
+                if output_buf then
+                  output_buf:append("connect failed: " .. tostring(cerr), "stderr")
+                  output_buf:finalize("error")
+                end
                 vim.notify("connect failed: " .. tostring(cerr), vim.log.levels.ERROR)
                 return
+              end
+              if output_buf then
+                output_buf:append_progress("✓ Connected to Neovim in container!")
+                output_buf:finalize("success")
               end
               vim.notify("Connected to Neovim in container! Use :detach to disconnect.")
               if type(on_success) == "function" then
@@ -212,6 +237,16 @@ local function attach_to_container(container_id, config_path, config, command, e
             })
           end
         end),
+        stdout = output_buf and function(data)
+          if data then
+            output_buf:append(data, "stdout")
+          end
+        end or nil,
+        stderr = output_buf and function(data)
+          if data then
+            output_buf:append(data, "stderr")
+          end
+        end or nil,
       })
       end -- launch_with_shell
 
@@ -229,19 +264,38 @@ local function attach_to_container(container_id, config_path, config, command, e
           remote_env[k] = v
         end
       end
-       cli.exec(container_id, command, {
-        remote_env = remote_env,
-        extra_cli_args = extra_cli_args,
-        on_exit = sched(function(result)
-          if result.code == 0 then
-            if type(on_success) == "function" then
-              on_success(config)
-            end
-          else
-            vim.notify("Failed to attach to container: " .. (result.stderr or "unknown error"), vim.log.levels.ERROR)
-          end
-        end),
-      })
+        cli.exec(container_id, command, {
+         remote_env = remote_env,
+         extra_cli_args = extra_cli_args,
+         on_exit = sched(function(result)
+           if output_buf then
+             if result.code == 0 then
+               output_buf:append_progress("✓ Command completed successfully")
+               output_buf:finalize("success")
+             else
+               output_buf:append("Failed to attach to container: " .. (result.stderr or "unknown error"), "stderr")
+               output_buf:finalize("error")
+             end
+           end
+           if result.code == 0 then
+             if type(on_success) == "function" then
+               on_success(config)
+             end
+           else
+             vim.notify("Failed to attach to container: " .. (result.stderr or "unknown error"), vim.log.levels.ERROR)
+           end
+         end),
+         stdout = output_buf and function(data)
+           if data then
+             output_buf:append(data, "stdout")
+           end
+         end or nil,
+         stderr = output_buf and function(data)
+           if data then
+             output_buf:append(data, "stderr")
+           end
+         end or nil,
+       })
     end
   end
 
@@ -278,6 +332,13 @@ end
 ---@field callback? function success callback
 function M.attach(opts)
   opts = opts or {}
+  local show_output = opts.show_output ~= false
+
+  local output_buf
+  if show_output then
+    local output_buffer = require("devcontainer.internal.output_buffer")
+    output_buf = output_buffer("Attach")
+  end
 
   local config_path = opts.config_path
   local config_dir
@@ -286,6 +347,10 @@ function M.attach(opts)
     config_path = path
     config_dir = dir
 
+    if output_buf then
+      output_buf:append_progress("Reading configuration...")
+    end
+
     -- Use CLI to parse the config (handles JSONC properly)
     cli.read_config(config_dir or vim.loop.cwd(), {
       config = config_path,
@@ -293,18 +358,34 @@ function M.attach(opts)
       extra_cli_args = opts.extra_cli_args,
       on_exit = sched(function(read_result)
         if read_result.code ~= 0 then
+          if output_buf then
+            output_buf:append("Failed to read devcontainer config: " .. (read_result.error or "unknown error"), "stderr")
+            output_buf:finalize("error")
+          end
           vim.notify("Failed to read devcontainer config: " .. (read_result.error or "unknown error"), vim.log.levels.ERROR)
           return
+        end
+
+        if output_buf then
+          output_buf:append_progress("Configuration loaded")
         end
 
         local raw_data = read_result.data
         local config = raw_data and raw_data.mergedConfiguration or raw_data and raw_data.configuration
         if not config then
+          if output_buf then
+            output_buf:append("No configuration found in devcontainer config", "stderr")
+            output_buf:finalize("error")
+          end
           vim.notify("No configuration found in devcontainer config", vim.log.levels.ERROR)
           return
         end
 
         local workspace_folder = vim.fn.fnamemodify(config_dir, ":h") or vim.loop.cwd()
+
+        if output_buf then
+          output_buf:append_progress("Finding/starting container...")
+        end
 
         cli.find_container(nil, workspace_folder, config_path, function(container_id)
           -- Container already exists, attach to it directly
@@ -314,12 +395,17 @@ function M.attach(opts)
           }
           status.add_container(container_status)
 
+          if output_buf then
+            output_buf:append_progress("Container ready")
+          end
+
           attach_to_container(
             container_id,
             config_path,
             config,
             opts.command,
             opts.extra_cli_args,
+            output_buf,
             function()
               run_host_lifecycle(config and config.postAttachCommand)
               if type(opts.callback) == "function" then
@@ -329,18 +415,34 @@ function M.attach(opts)
           )
         end, function(err)
           -- Container doesn't exist, create it
+          if output_buf then
+            output_buf:append_progress("Starting new container...")
+          end
+
           cli.up(workspace_folder, {
             config = config_path,
             include_configuration = true,
             extra_cli_args = opts.extra_cli_args,
             on_exit = sched(function(result)
               if result.code ~= 0 then
+                if output_buf then
+                  output_buf:append("Failed to start devcontainer: " .. (result.error or "unknown error"), "stderr")
+                  output_buf:finalize("error")
+                end
                 vim.notify("Failed to start devcontainer: " .. (result.error or "unknown error"), vim.log.levels.ERROR)
                 return
               end
 
+              if output_buf then
+                output_buf:append_progress("Container started")
+              end
+
               local container_id = result.data and result.data.containerId
               if not container_id then
+                if output_buf then
+                  output_buf:append("No container ID returned from devcontainer up", "stderr")
+                  output_buf:finalize("error")
+                end
                 vim.notify("No container ID returned from devcontainer up", vim.log.levels.ERROR)
                 return
               end
@@ -361,6 +463,7 @@ function M.attach(opts)
                  config,
                  opts.command,
                  opts.extra_cli_args,
+                 output_buf,
                  function()
                    run_host_lifecycle(config and config.postAttachCommand)
                    if type(opts.callback) == "function" then
@@ -369,9 +472,29 @@ function M.attach(opts)
                  end
                )
             end),
+            stdout = output_buf and function(data)
+              if data then
+                output_buf:append(data, "stdout")
+              end
+            end or nil,
+            stderr = output_buf and function(data)
+              if data then
+                output_buf:append(data, "stderr")
+              end
+            end or nil,
           })
         end)
       end),
+      stdout = output_buf and function(data)
+        if data then
+          output_buf:append(data, "stdout")
+        end
+      end or nil,
+      stderr = output_buf and function(data)
+        if data then
+          output_buf:append(data, "stderr")
+        end
+      end or nil,
     })
   end
 
@@ -426,6 +549,135 @@ function M.stop(opts)
         if path then
           on_config_found(path, dir)
         else
+          vim.notify("No devcontainer.json found in workspace", vim.log.levels.ERROR)
+        end
+      end
+    )
+  end
+end
+
+---Build a devcontainer image
+---@param opts? table options
+---@field config_path? string specific config file path
+---@field extra_cli_args? string[] additional devcontainer CLI arguments to pass through
+---@field no_cache? boolean skip Docker cache (force full rebuild)
+---@field show_output? boolean show output buffer (default: true)
+---@field callback? function success callback
+function M.build(opts)
+  opts = opts or {}
+  local show_output = opts.show_output ~= false
+
+  local output_buf
+  if show_output then
+    local output_buffer = require("devcontainer.internal.output_buffer")
+    output_buf = output_buffer("Build")
+  end
+
+  local function on_config_found(path, dir)
+    local config_name = path:match("([^/]+)/devcontainer%.json$") or "devcontainer"
+    local workspace_folder = dir and vim.fn.fnamemodify(dir, ":h") or vim.loop.cwd()
+
+    local function do_build()
+      local build_args = {}
+      if opts.no_cache then
+        table.insert(build_args, "--no-cache")
+      end
+
+      if opts.extra_cli_args then
+        vim.list_extend(build_args, opts.extra_cli_args)
+      end
+
+      if output_buf then
+        output_buf:append_progress("Building container image...")
+      end
+
+      cli.build(workspace_folder, {
+        config = path,
+        extra_cli_args = #build_args > 0 and build_args or nil,
+        on_exit = sched(function(result)
+          if output_buf then
+            if result.code == 0 then
+              output_buf:finalize("success")
+              vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
+            else
+              output_buf:finalize("error")
+              vim.notify("Failed to build devcontainer: " .. (result.error or "unknown error"), vim.log.levels.ERROR)
+            end
+          else
+            if result.code == 0 then
+              vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
+            else
+              vim.notify("Failed to build devcontainer: " .. (result.error or "unknown error"), vim.log.levels.ERROR)
+            end
+          end
+
+          if type(opts.callback) == "function" then
+            opts.callback()
+          end
+        end),
+        stdout = output_buf and function(data)
+          if data then
+            output_buf:append(data, "stdout")
+          end
+        end or nil,
+        stderr = output_buf and function(data)
+          if data then
+            output_buf:append(data, "stderr")
+          end
+        end or nil,
+      })
+    end
+
+    if output_buf then
+      output_buf:append_progress("Reading configuration...")
+    end
+
+    cli.read_config(dir or vim.loop.cwd(), {
+      config = path,
+      include_merged = true,
+      extra_cli_args = opts.extra_cli_args,
+      on_exit = sched(function(read_result)
+        if read_result.code ~= 0 then
+          if output_buf then
+            output_buf:append("Failed to read devcontainer config: " .. (read_result.error or "unknown error"), "stderr")
+            output_buf:finalize("error")
+          end
+          vim.notify("Failed to read devcontainer config: " .. (read_result.error or "unknown error"), vim.log.levels.ERROR)
+          return
+        end
+
+        if output_buf then
+          output_buf:append_progress("Configuration loaded")
+        end
+        do_build()
+      end),
+      stdout = output_buf and function(data)
+        if data then
+          output_buf:append(data, "stdout")
+        end
+      end or nil,
+      stderr = output_buf and function(data)
+        if data then
+          output_buf:append(data, "stderr")
+        end
+      end or nil,
+    })
+  end
+
+  if opts.config_path then
+    local dir = opts.config_path:match("^(.+)/[^/]+$")
+    on_config_found(opts.config_path, dir)
+  else
+    find_nearest_config(
+      plugin_config.config_search_start() or vim.loop.cwd(),
+      function(path, dir)
+        if path then
+          on_config_found(path, dir)
+        else
+          if output_buf then
+            output_buf:append("No devcontainer.json found in workspace", "stderr")
+            output_buf:finalize("error")
+          end
           vim.notify("No devcontainer.json found in workspace", vim.log.levels.ERROR)
         end
       end
