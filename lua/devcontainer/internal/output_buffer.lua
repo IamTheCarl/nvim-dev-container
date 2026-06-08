@@ -73,6 +73,53 @@ function OutputBuffer:_setup_keymaps()
   )
 end
 
+---Decode JSON log line from devcontainer CLI
+---@param line string JSON line to decode
+---@return string decoded human-readable line
+local function decode_json_log(line)
+  -- Try to parse as JSON
+  local ok, data = pcall(vim.json.decode, line)
+  if not ok then
+    -- Decoding failed, return as-is
+    return line
+  end
+  
+  if type(data) ~= "table" then
+    -- Not a JSON object, return as-is
+    return line
+  end
+
+  -- Extract log level and message
+  local level = data.level
+  local message = data.text or data.message or ""
+
+  -- If no level, return original line
+  if not level then
+    return line
+  end
+
+  -- Simplify level names for readability
+  local level_map = {
+    debug = "DEBUG",
+    info = "INFO",
+    warning = "WARN",
+    error = "ERROR",
+    [0] = "DEBUG",
+    [1] = "INFO",
+    [2] = "WARN",
+    [3] = "ERROR",
+  }
+
+  local display_level = level_map[level] or tostring(level):upper()
+
+  -- Format: [LEVEL] message
+  if message and message ~= "" then
+    return string.format("[%s] %s", display_level, message)
+  else
+    return line
+  end
+end
+
 ---Append text to the buffer, preserving ANSI codes
 ---@param text string text to append
 ---@param type? "stdout" | "stderr" | "info" message type (for logging)
@@ -82,6 +129,7 @@ function OutputBuffer:append(text, type)
   end
 
   type = type or "stdout"
+  local captured_type = type  -- Capture for closure
 
   -- Schedule the append to avoid fast event context issues
   -- (stdout/stderr callbacks run in fast event context)
@@ -101,6 +149,13 @@ function OutputBuffer:append(text, type)
     end
 
     if #lines > 0 then
+      -- Decode JSON log lines if this is stdout from devcontainer CLI
+      if captured_type == "stdout" then
+        for i, line in ipairs(lines) do
+          lines[i] = decode_json_log(line)
+        end
+      end
+
       vim.api.nvim_buf_set_option(self.bufnr, "modifiable", true)
       vim.api.nvim_buf_set_lines(self.bufnr, -1, -1, false, lines)
       vim.api.nvim_buf_set_option(self.bufnr, "modifiable", false)
