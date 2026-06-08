@@ -83,30 +83,34 @@ function OutputBuffer:append(text, type)
 
   type = type or "stdout"
 
-  -- Check if buffer still exists
-  if not vim.api.nvim_buf_is_valid(self.bufnr) then
-    self.closed = true
-    return
-  end
-
-  -- Split text by newlines and append each line
-  local lines = vim.split(text, "\n", { plain = true })
-
-  -- Remove empty trailing line if text ended with newline
-  if lines[#lines] == "" then
-    table.remove(lines)
-  end
-
-  if #lines > 0 then
-    vim.api.nvim_buf_set_option(self.bufnr, "modifiable", true)
-    vim.api.nvim_buf_set_lines(self.bufnr, -1, -1, false, lines)
-    vim.api.nvim_buf_set_option(self.bufnr, "modifiable", false)
-
-    -- Auto-scroll to bottom
-    if vim.api.nvim_win_is_valid(self.winid) then
-      vim.api.nvim_win_set_cursor(self.winid, { vim.api.nvim_buf_line_count(self.bufnr), 0 })
+  -- Schedule the append to avoid fast event context issues
+  -- (stdout/stderr callbacks run in fast event context)
+  vim.schedule(function()
+    -- Check if buffer still exists
+    if not vim.api.nvim_buf_is_valid(self.bufnr) then
+      self.closed = true
+      return
     end
-  end
+
+    -- Split text by newlines and append each line
+    local lines = vim.split(text, "\n", { plain = true })
+
+    -- Remove empty trailing line if text ended with newline
+    if lines[#lines] == "" then
+      table.remove(lines)
+    end
+
+    if #lines > 0 then
+      vim.api.nvim_buf_set_option(self.bufnr, "modifiable", true)
+      vim.api.nvim_buf_set_lines(self.bufnr, -1, -1, false, lines)
+      vim.api.nvim_buf_set_option(self.bufnr, "modifiable", false)
+
+      -- Auto-scroll to bottom
+      if vim.api.nvim_win_is_valid(self.winid) then
+        vim.api.nvim_win_set_cursor(self.winid, { vim.api.nvim_buf_line_count(self.bufnr), 0 })
+      end
+    end
+  end)
 end
 
 ---Append a progress line with timestamp
@@ -123,21 +127,28 @@ function OutputBuffer:finalize(status)
     return
   end
 
-  local timestamp = os.date("%H:%M:%S")
-  local status_line
+  -- Schedule to avoid fast event context issues
+  vim.schedule(function()
+    if self.closed then
+      return
+    end
 
-  if status == "success" then
-    status_line = string.format("[%s] ✓ Operation completed successfully. Press <CR> to close.", timestamp)
-  else
-    status_line = string.format("[%s] ✗ Operation failed. Press <CR> to close.", timestamp)
-  end
+    local timestamp = os.date("%H:%M:%S")
+    local status_line
 
-  self:append(status_line, "info")
+    if status == "success" then
+      status_line = string.format("[%s] ✓ Operation completed successfully. Press <CR> to close.", timestamp)
+    else
+      status_line = string.format("[%s] ✗ Operation failed. Press <CR> to close.", timestamp)
+    end
 
-  -- Make buffer non-modifiable
-  if vim.api.nvim_buf_is_valid(self.bufnr) then
-    vim.api.nvim_buf_set_option(self.bufnr, "modifiable", false)
-  end
+    self:append(status_line, "info")
+
+    -- Make buffer non-modifiable
+    if vim.api.nvim_buf_is_valid(self.bufnr) then
+      vim.api.nvim_buf_set_option(self.bufnr, "modifiable", false)
+    end
+  end)
 end
 
 ---Close the buffer and window
@@ -168,7 +179,7 @@ end
 ---Check if buffer is still valid
 ---@return boolean
 function OutputBuffer:is_valid()
-  return not self.closed and vim.api.nvim_buf_is_valid(self.bufnr)
+  return not self.closed
 end
 
 log.wrap(M)
