@@ -23,15 +23,24 @@ function M.decode_line(json_line)
   end
 
   -- Try to parse as JSON
-  local ok, parsed = pcall(vim.fn.json_decode, json_line)
+  local ok, parsed = pcall(vim.json.decode, json_line)
   if not ok or not parsed then
     -- Not JSON, return as-is
     return json_line
   end
 
-  -- Check if it's a devcontainer log format
-  if not parsed.type or not parsed.level or not parsed.text then
-    -- Not a devcontainer log, return original
+  -- For "raw" type messages, just extract and return the text
+  -- These contain actual build/output text embedded as JSON
+  if parsed.type == "raw" then
+    if parsed.text then
+      return parsed.text
+    end
+    return json_line
+  end
+
+  -- Check if it has standard log format
+  if not parsed.level or not parsed.text then
+    -- Not a standard log line, return original
     return json_line
   end
 

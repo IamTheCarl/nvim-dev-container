@@ -89,7 +89,17 @@ local function decode_json_log(line)
     return line
   end
 
-  -- Extract log level and message
+  -- For "raw" type messages, just extract and return the text
+  -- These contain actual build/output text embedded as JSON
+  if data.type == "raw" then
+    -- Raw messages contain the actual build output in the "text" field
+    if data.text then
+      return data.text
+    end
+    return line
+  end
+
+  -- For other types, format with level
   local level = data.level
   local message = data.text or data.message or ""
 
@@ -140,26 +150,98 @@ function OutputBuffer:append(text, type)
       return
     end
 
-    -- Split text by newlines and append each line
-    local lines = vim.split(text, "\n", { plain = true })
+    local lines_to_add = {}
 
-    -- Remove empty trailing line if text ended with newline
-    if lines[#lines] == "" then
-      table.remove(lines)
+    -- Decode JSON log lines if this is stdout from devcontainer CLI
+    if captured_type == "stdout" then
+      -- Try to parse each logical line as JSON
+      -- For JSON log lines, we need to be careful about embedded newlines in the "text" field
+      local remaining = text
+      while remaining and remaining ~= "" do
+        -- Try to find the start of a JSON object
+        local first_brace = remaining:find("{")
+        if not first_brace then
+          -- No JSON object found, add remaining as plain text
+          if remaining ~= "" then
+            for _, line in ipairs(vim.split(remaining, "\n", { plain = true })) do
+              if line ~= "" then
+                table.insert(lines_to_add, line)
+              end
+            end
+          end
+          break
+        end
+
+        -- Text before the brace
+        if first_brace > 1 then
+          local prefix = remaining:sub(1, first_brace - 1)
+          for _, line in ipairs(vim.split(prefix, "\n", { plain = true })) do
+            if line ~= "" then
+              table.insert(lines_to_add, line)
+            end
+          end
+        end
+
+        -- Try to find the matching closing brace
+        local json_start = first_brace
+        local brace_count = 0
+        local in_string = false
+        local escape_next = false
+        local json_end = nil
+
+        for i = json_start, #remaining do
+          local char = remaining:sub(i, i)
+
+          if escape_next then
+            escape_next = false
+          elseif char == "\\" then
+            escape_next = true
+          elseif char == '"' and not escape_next then
+            in_string = not in_string
+          elseif not in_string then
+            if char == "{" then
+              brace_count = brace_count + 1
+            elseif char == "}" then
+              brace_count = brace_count - 1
+              if brace_count == 0 then
+                json_end = i
+                break
+              end
+            end
+          end
+        end
+
+        if json_end then
+          -- Found a complete JSON object
+          local json_str = remaining:sub(json_start, json_end)
+          table.insert(lines_to_add, decode_json_log(json_str))
+
+          -- Move past this JSON object
+          remaining = remaining:sub(json_end + 1)
+          -- Skip leading whitespace/newlines
+          remaining = remaining:match("^%s*(.*)$")
+        else
+          -- Incomplete JSON, add what we have and stop
+          local partial = remaining:sub(json_start)
+          if partial ~= "" then
+            table.insert(lines_to_add, partial)
+          end
+          break
+        end
+      end
+    else
+      -- For non-stdout, just split by newlines normally
+      local lines = vim.split(text, "\n", { plain = true })
+      for _, line in ipairs(lines) do
+        if line ~= "" then
+          table.insert(lines_to_add, line)
+        end
+      end
     end
 
-    if #lines > 0 then
-      -- Decode JSON log lines if this is stdout from devcontainer CLI
-      if captured_type == "stdout" then
-        local decoded_lines = {}
-        for i, line in ipairs(lines) do
-          decoded_lines[i] = decode_json_log(line)
-        end
-        lines = decoded_lines
-      end
-
+    if #lines_to_add > 0 then
       vim.api.nvim_buf_set_option(self.bufnr, "modifiable", true)
-      vim.api.nvim_buf_set_lines(self.bufnr, -1, -1, false, lines)
+      vim.api.nvim_buf_set_lines(self.bufnr, -1, -1, false, lines_to_add)
       vim.api.nvim_buf_set_option(self.bufnr, "modifiable", false)
 
       -- Auto-scroll to bottom
