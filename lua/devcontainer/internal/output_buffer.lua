@@ -34,12 +34,14 @@ function M.new(title, opts)
   vim.api.nvim_set_option_value("bufhidden", "wipe", { buf = bufnr })
   vim.api.nvim_set_option_value("swapfile", false, { buf = bufnr })
   vim.api.nvim_set_option_value("modifiable", true, { buf = bufnr })
-  vim.api.nvim_set_option_value("number", true, { buf = bufnr })
 
   -- Create split window
   vim.cmd(string.format("split | resize %d", height))
   local winid = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(winid, bufnr)
+
+  -- Set window-local options
+  vim.api.nvim_set_option_value("number", true, { win = winid })
 
   local self = setmetatable({
     bufnr = bufnr,
