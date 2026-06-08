@@ -108,11 +108,43 @@ function M.setup(opts)
 
   if opts.generate_commands ~= false then
     vim.api.nvim_create_user_command("DevcontainerAttach", function(args)
-      local cmd = "nvim"
-      if #args.fargs > 0 then
-        cmd = table.concat(args.fargs, " ")
+      -- Parse arguments using -- as a delimiter
+      -- Everything before -- is passed to devcontainer CLI
+      -- Everything after -- is the command to run in the container
+      local devcontainer_args = {}
+      local container_cmd = nil
+      local delimiter_index = nil
+
+      for i, arg in ipairs(args.fargs) do
+        if arg == "--" then
+          delimiter_index = i
+          break
+        end
       end
-      commands.attach({ command = cmd })
+
+      if delimiter_index then
+        -- Found delimiter: split args
+        for i = 1, delimiter_index - 1 do
+          table.insert(devcontainer_args, args.fargs[i])
+        end
+        if delimiter_index < #args.fargs then
+          container_cmd = table.concat(vim.list_slice(args.fargs, delimiter_index + 1), " ")
+        end
+      else
+        -- No delimiter: all args are either devcontainer args or a container command
+        -- Heuristic: if first arg starts with --, treat all as devcontainer args
+        -- Otherwise, treat all as a container command
+        if #args.fargs > 0 and args.fargs[1]:match("^%-%-") then
+          devcontainer_args = args.fargs
+        else
+          container_cmd = #args.fargs > 0 and table.concat(args.fargs, " ") or nil
+        end
+      end
+
+      commands.attach({
+        command = container_cmd or "nvim",
+        extra_cli_args = #devcontainer_args > 0 and devcontainer_args or nil,
+      })
     end, {
       nargs = "*",
       desc = "Attach to devcontainer using devcontainer CLI",

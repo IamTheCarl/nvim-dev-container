@@ -119,8 +119,9 @@ end
 ---@param config_path string path to devcontainer.json
 ---@param config table parsed devcontainer.json data from CLI
 ---@param command string|table command to run (default: "nvim")
+---@param extra_cli_args? string[] additional devcontainer CLI arguments to pass through
 ---@param on_success? function callback with config data
-local function attach_to_container(container_id, config_path, config, command, on_success)
+local function attach_to_container(container_id, config_path, config, command, extra_cli_args, on_success)
   command = command or "nvim"
 
   local function do_attach()
@@ -161,6 +162,7 @@ local function attach_to_container(container_id, config_path, config, command, o
           )
         cli.exec(container_id, "/bin/sh", { "-c", launch_script }, {
         remote_env = remote_env,
+        extra_cli_args = extra_cli_args,
         on_exit = sched(function(result)
           if result.code ~= 0 then
             vim.notify("Failed to start Neovim in container: " .. (result.stderr or "unknown error"), vim.log.levels.ERROR)
@@ -227,8 +229,9 @@ local function attach_to_container(container_id, config_path, config, command, o
           remote_env[k] = v
         end
       end
-      cli.exec(container_id, command, {
+       cli.exec(container_id, command, {
         remote_env = remote_env,
+        extra_cli_args = extra_cli_args,
         on_exit = sched(function(result)
           if result.code == 0 then
             if type(on_success) == "function" then
@@ -271,6 +274,7 @@ end
 ---@param opts? table options
 ---@field config_path? string specific config file path
 ---@field command? string|table command to run in container
+---@field extra_cli_args? string[] additional devcontainer CLI arguments to pass through
 ---@field callback? function success callback
 function M.attach(opts)
   opts = opts or {}
@@ -286,6 +290,7 @@ function M.attach(opts)
     cli.read_config(config_dir or vim.loop.cwd(), {
       config = config_path,
       include_merged = true,
+      extra_cli_args = opts.extra_cli_args,
       on_exit = sched(function(read_result)
         if read_result.code ~= 0 then
           vim.notify("Failed to read devcontainer config: " .. (read_result.error or "unknown error"), vim.log.levels.ERROR)
@@ -314,6 +319,7 @@ function M.attach(opts)
             config_path,
             config,
             opts.command,
+            opts.extra_cli_args,
             function()
               run_host_lifecycle(config and config.postAttachCommand)
               if type(opts.callback) == "function" then
@@ -326,6 +332,7 @@ function M.attach(opts)
           cli.up(workspace_folder, {
             config = config_path,
             include_configuration = true,
+            extra_cli_args = opts.extra_cli_args,
             on_exit = sched(function(result)
               if result.code ~= 0 then
                 vim.notify("Failed to start devcontainer: " .. (result.error or "unknown error"), vim.log.levels.ERROR)
@@ -348,18 +355,19 @@ function M.attach(opts)
 
               run_lifecycle_commands(config, container_id)
 
-              attach_to_container(
-                container_id,
-                config_path,
-                config,
-                opts.command,
-                function()
-                  run_host_lifecycle(config and config.postAttachCommand)
-                  if type(opts.callback) == "function" then
-                    opts.callback(config)
-                  end
-                end
-              )
+               attach_to_container(
+                 container_id,
+                 config_path,
+                 config,
+                 opts.command,
+                 opts.extra_cli_args,
+                 function()
+                   run_host_lifecycle(config and config.postAttachCommand)
+                   if type(opts.callback) == "function" then
+                     opts.callback(config)
+                   end
+                 end
+               )
             end),
           })
         end)

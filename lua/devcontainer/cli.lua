@@ -224,6 +224,7 @@ end
 ---@field default_user_env_probe? string "none" | "loginInteractiveShell" | "interactiveShell" | "loginShell"
 ---@field id_labels? string[] id labels
 ---@field include_configuration? boolean include configuration in output
+---@field extra_cli_args? string[] additional devcontainer CLI arguments to pass through
 ---@field on_exit? fun(result: CliResult) callback
 ---@return table? handle, integer? pid
 function M.up(workspace_folder, opts)
@@ -262,6 +263,10 @@ function M.up(workspace_folder, opts)
     table.insert(args, "--include-configuration")
   end
 
+  if opts.extra_cli_args then
+    vim.list_extend(args, opts.extra_cli_args)
+  end
+
   return run_cli(args, opts)
 end
 
@@ -274,6 +279,7 @@ end
 ---@field workspace_folder? string workspace folder (alternative to container_id target)
 ---@field remote_env? table[string,string] remote environment variables
 ---@field default_user_env_probe? string env probe type
+---@field extra_cli_args? string[] additional devcontainer CLI arguments to pass through
 ---@field on_exit? fun(result: CliResult) callback
 ---@return table? handle, integer? pid
 function M.exec(target, cmd, cmd_args, opts)
@@ -316,6 +322,10 @@ function M.exec(target, cmd, cmd_args, opts)
     vim.list_extend(cli_args, { "--default-user-env-probe", opts.default_user_env_probe })
   end
 
+  if opts.extra_cli_args then
+    vim.list_extend(cli_args, opts.extra_cli_args)
+  end
+
   table.insert(cli_args, cmd)
 
   if cmd_args then
@@ -332,6 +342,7 @@ end
 ---@param workspace_folder string path to workspace folder
 ---@param opts? table options
 ---@field config? string devcontainer.json path
+---@field extra_cli_args? string[] additional devcontainer CLI arguments to pass through
 ---@field on_exit? fun(result: CliResult) callback
 ---@return table? handle, integer? pid
 function M.recreate(workspace_folder, opts)
@@ -344,6 +355,10 @@ function M.recreate(workspace_folder, opts)
     vim.list_extend(args, { "--config", opts.config })
   end
 
+  if opts.extra_cli_args then
+    vim.list_extend(args, opts.extra_cli_args)
+  end
+
   return run_cli(args, opts)
 end
 
@@ -353,6 +368,7 @@ end
 ---@field config? string devcontainer.json path
 ---@field include_features? boolean include features configuration
 ---@field include_merged? boolean include merged configuration
+---@field extra_cli_args? string[] additional devcontainer CLI arguments to pass through
 ---@field on_exit? fun(result: CliResult) callback
 ---@return table? handle, integer? pid
 function M.read_config(workspace_folder, opts)
@@ -371,6 +387,10 @@ function M.read_config(workspace_folder, opts)
 
   if opts.include_merged then
     table.insert(args, "--include-merged-configuration")
+  end
+
+  if opts.extra_cli_args then
+    vim.list_extend(args, opts.extra_cli_args)
   end
 
   return run_cli(args, opts)
