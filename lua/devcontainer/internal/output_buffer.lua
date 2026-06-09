@@ -162,13 +162,21 @@ function OutputBuffer:append(text, type)
       return
     end
 
-    local lines_to_add = {}
+    -- DEBUG: Always add a marker to see if append is called
+    local lines_to_add = {string.format("[append called: type=%s]", captured_type)}
 
-    -- Decode JSON log lines if this is stdout from devcontainer CLI
-    if captured_type == "stdout" then
+    -- Decode JSON log lines if this is stdout/stderr from devcontainer CLI
+    if captured_type == "stdout" or captured_type == "stderr" then
       -- Prepend any buffered partial JSON from previous calls
       text = captured_self.json_buffer .. text
       captured_self.json_buffer = ""
+      
+      -- DEBUG: Add marker so we know this is stdout/stderr
+      if captured_type == "stdout" then
+        table.insert(lines_to_add, "[STDOUT MARKER]")
+      else
+        table.insert(lines_to_add, "[STDERR MARKER]")
+      end
 
       -- Try to parse each logical line as JSON
       -- For JSON log lines, we need to be careful about embedded newlines in the "text" field
@@ -236,7 +244,8 @@ function OutputBuffer:append(text, type)
         if json_end then
           -- Found a complete JSON object
           local json_str = remaining:sub(json_start, json_end)
-          table.insert(lines_to_add, decode_json_log(json_str))
+          local decoded = decode_json_log(json_str)
+          table.insert(lines_to_add, string.format("[DECODED] %s", decoded))
 
           -- Move past this JSON object
           remaining = remaining:sub(json_end + 1)
@@ -253,6 +262,7 @@ function OutputBuffer:append(text, type)
       end
     else
       -- For non-stdout, just split by newlines normally
+      table.insert(lines_to_add, string.format("[TYPE:%s]", captured_type))
       local lines = vim.split(text, "\n", { plain = true })
       for _, line in ipairs(lines) do
         if line ~= "" then
