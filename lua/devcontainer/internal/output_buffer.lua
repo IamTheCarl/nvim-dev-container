@@ -383,6 +383,27 @@ function M.decode_json_log(line)
   return decode_json_log(line)
 end
 
+---Decode multiple newline-separated JSON log lines
+---@param text string newline-separated JSON lines
+---@return string decoded human-readable text
+function M.decode_json_logs(text)
+  if not text or text == "" then
+    return text
+  end
+
+  local lines = vim.split(text, "\n", { plain = true })
+  local decoded_lines = {}
+
+  for _, line in ipairs(lines) do
+    if line and line ~= "" then
+      local decoded = decode_json_log(line)
+      table.insert(decoded_lines, decoded)
+    end
+  end
+
+  return table.concat(decoded_lines, "\n")
+end
+
 log.wrap(M)
 
 return setmetatable(M, {

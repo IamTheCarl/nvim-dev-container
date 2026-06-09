@@ -599,15 +599,15 @@ function M.build(opts)
              if result.code == 0 then
                output_buf:finalize("success")
                vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
-             else
-               local error_msg = result.error or "unknown error"
-               -- Decode JSON error messages if present
-               local output_buffer = require("devcontainer.internal.output_buffer")
-               error_msg = output_buffer.decode_json_log(error_msg)
-               output_buf:append("Error: " .. error_msg, "stderr")
-               output_buf:finalize("error")
-               vim.notify("Failed to build devcontainer: " .. error_msg, vim.log.levels.ERROR)
-             end
+              else
+                local error_msg = result.error or "unknown error"
+                -- Decode JSON error messages if present
+                local output_buffer = require("devcontainer.internal.output_buffer")
+                error_msg = output_buffer.decode_json_logs(error_msg)
+                output_buf:append("Error: " .. error_msg, "stderr")
+                output_buf:finalize("error")
+                vim.notify("Failed to build devcontainer: " .. error_msg, vim.log.levels.ERROR)
+              end
            else
              if result.code == 0 then
                vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
@@ -642,15 +642,18 @@ function M.build(opts)
       include_merged = true,
       extra_cli_args = opts.extra_cli_args,
        on_exit = sched(function(read_result)
-         if read_result.code ~= 0 then
-           if output_buf then
-             local error_msg = read_result.error or "unknown error"
-             -- Decode JSON error messages if present
-             local output_buffer = require("devcontainer.internal.output_buffer")
-             error_msg = output_buffer.decode_json_log(error_msg)
-             output_buf:append("Error: " .. error_msg, "stderr")
-             output_buf:finalize("error")
-           end
+          if read_result.code ~= 0 then
+            local error_msg = read_result.error or "unknown error"
+            -- Decode JSON error messages if present
+            local output_buffer = require("devcontainer.internal.output_buffer")
+            error_msg = output_buffer.decode_json_logs(error_msg)
+            if output_buf then
+              output_buf:append("Error: " .. error_msg, "stderr")
+              output_buf:finalize("error")
+            end
+            vim.notify("Failed to read devcontainer config: " .. error_msg, vim.log.levels.ERROR)
+            return
+          end
            vim.notify("Failed to read devcontainer config: " .. (read_result.error or "unknown error"), vim.log.levels.ERROR)
            return
          end
