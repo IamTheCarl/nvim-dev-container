@@ -38,6 +38,19 @@ local function create_override_config(config_path, input_values)
   local content = file:read("*a")
   file:close()
 
+  -- Strip JSONC comments (lines starting with // and trailing comments)
+  -- This is a simple approach for devcontainer.json files
+  local lines = {}
+  for line in content:gmatch("[^\n]+") do
+    -- Remove trailing comments
+    line = line:gsub("//.*$", "")
+    -- Only keep non-empty lines
+    if line:match("[^%s]") then
+      table.insert(lines, line)
+    end
+  end
+  content = table.concat(lines, "\n")
+
   -- Parse JSON
   local ok, config = pcall(vim.json.decode, content)
   if not ok then
@@ -63,11 +76,19 @@ local function create_override_config(config_path, input_values)
     end
   end
 
-  -- Create temporary file
-  local temp_path = vim.fn.tempname() .. ".devcontainer.json"
-  local temp_file = io.open(temp_path, "w")
-  if not temp_file then
-    log.error("Failed to create temporary override config: " .. temp_path)
+  -- Create override config in the same directory as the original config
+  -- This ensures relative paths (like features) still resolve correctly
+  local config_dir = config_path:match("^(.+)/[^/]+$")
+  if not config_dir then
+    log.error("Failed to determine config directory from: " .. config_path)
+    return nil
+  end
+
+  -- Create override config with a special prefix to indicate it's temporary
+  local override_path = config_dir .. "/devcontainer.override.json"
+  local override_file = io.open(override_path, "w")
+  if not override_file then
+    log.error("Failed to create override config: " .. override_path)
     return nil
   end
 
@@ -75,16 +96,16 @@ local function create_override_config(config_path, input_values)
   local ok_write, encoded = pcall(vim.json.encode, config)
   if not ok_write then
     log.error("Failed to encode override config: " .. tostring(encoded))
-    temp_file:close()
-    vim.fn.delete(temp_path)
+    override_file:close()
+    vim.fn.delete(override_path)
     return nil
   end
 
-  temp_file:write(encoded)
-  temp_file:close()
+  override_file:write(encoded)
+  override_file:close()
 
-  log.debug("Created override config at: " .. temp_path)
-  return temp_path
+  log.debug("Created override config at: " .. override_path)
+  return override_path
 end
 
 ---Find the nearest .devcontainer.json or .devcontainer/devcontainer.json file
