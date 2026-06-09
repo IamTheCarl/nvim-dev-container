@@ -151,30 +151,44 @@ function M.setup(opts)
     })
 
     vim.api.nvim_create_user_command("DevcontainerBuild", function(args)
-      -- Parse arguments: [--no-cache] [-- <extra_devcontainer_args>]
+      -- Parse arguments: [--no-cache] [--input-value NAME=VALUE ...] [-- <extra_devcontainer_args>]
       local no_cache = false
+      local input_values = {}
       local extra_cli_args = {}
       local delimiter_index = nil
 
-      for i, arg in ipairs(args.fargs) do
+      local i = 1
+      while i <= #args.fargs do
+        local arg = args.fargs[i]
         if arg == "--" then
           delimiter_index = i
           break
         elseif arg == "--no-cache" then
           no_cache = true
+          i = i + 1
+        elseif arg == "--input-value" then
+          -- Next argument should be NAME=VALUE
+          i = i + 1
+          if i <= #args.fargs then
+            table.insert(input_values, args.fargs[i])
+          end
+          i = i + 1
+        else
+          i = i + 1
         end
       end
 
       if delimiter_index then
         -- Collect args after --
-        for i = delimiter_index + 1, #args.fargs do
-          table.insert(extra_cli_args, args.fargs[i])
+        for j = delimiter_index + 1, #args.fargs do
+          table.insert(extra_cli_args, args.fargs[j])
         end
       end
 
       commands.build({
         no_cache = no_cache,
         extra_cli_args = #extra_cli_args > 0 and extra_cli_args or nil,
+        input_values = #input_values > 0 and input_values or nil,
       })
     end, {
       nargs = "*",
@@ -182,27 +196,40 @@ function M.setup(opts)
     })
 
     vim.api.nvim_create_user_command("DevcontainerRebuild", function(args)
-      -- Parse arguments: [-- <extra_devcontainer_args>]
+      -- Parse arguments: [--input-value NAME=VALUE ...] [-- <extra_devcontainer_args>]
+      local input_values = {}
       local extra_cli_args = {}
       local delimiter_index = nil
 
-      for i, arg in ipairs(args.fargs) do
+      local i = 1
+      while i <= #args.fargs do
+        local arg = args.fargs[i]
         if arg == "--" then
           delimiter_index = i
           break
+        elseif arg == "--input-value" then
+          -- Next argument should be NAME=VALUE
+          i = i + 1
+          if i <= #args.fargs then
+            table.insert(input_values, args.fargs[i])
+          end
+          i = i + 1
+        else
+          i = i + 1
         end
       end
 
       if delimiter_index then
         -- Collect args after --
-        for i = delimiter_index + 1, #args.fargs do
-          table.insert(extra_cli_args, args.fargs[i])
+        for j = delimiter_index + 1, #args.fargs do
+          table.insert(extra_cli_args, args.fargs[j])
         end
       end
 
       commands.build({
         no_cache = true,
         extra_cli_args = #extra_cli_args > 0 and extra_cli_args or nil,
+        input_values = #input_values > 0 and input_values or nil,
       })
     end, {
       nargs = "*",

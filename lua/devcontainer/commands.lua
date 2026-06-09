@@ -20,6 +20,73 @@ local function sched(fn)
   return vim.schedule_wrap(fn)
 end
 
+---Create an override devcontainer.json with input values merged into build.args
+---@param config_path string path to original devcontainer.json
+---@param input_values string[] array of "NAME=VALUE" strings
+---@return string|nil override_config_path path to temporary override file, or nil on error
+local function create_override_config(config_path, input_values)
+  if not input_values or #input_values == 0 then
+    return nil
+  end
+
+  -- Read original config
+  local file = io.open(config_path, "r")
+  if not file then
+    log.error("Failed to read config file: " .. config_path)
+    return nil
+  end
+  local content = file:read("*a")
+  file:close()
+
+  -- Parse JSON
+  local ok, config = pcall(vim.json.decode, content)
+  if not ok then
+    log.error("Failed to parse config JSON: " .. tostring(config))
+    return nil
+  end
+
+  -- Ensure build.args exists
+  if not config.build then
+    config.build = {}
+  end
+  if not config.build.args then
+    config.build.args = {}
+  end
+
+  -- Merge input values into build.args
+  for _, input_value in ipairs(input_values) do
+    local name, value = input_value:match("^([^=]+)=(.*)$")
+    if name and value then
+      config.build.args[name] = value
+    else
+      log.warn("Invalid input value format: " .. input_value .. " (expected NAME=VALUE)")
+    end
+  end
+
+  -- Create temporary file
+  local temp_path = vim.fn.tempname() .. ".devcontainer.json"
+  local temp_file = io.open(temp_path, "w")
+  if not temp_file then
+    log.error("Failed to create temporary override config: " .. temp_path)
+    return nil
+  end
+
+  -- Write override config
+  local ok_write, encoded = pcall(vim.json.encode, config)
+  if not ok_write then
+    log.error("Failed to encode override config: " .. tostring(encoded))
+    temp_file:close()
+    vim.fn.delete(temp_path)
+    return nil
+  end
+
+  temp_file:write(encoded)
+  temp_file:close()
+
+  log.debug("Created override config at: " .. temp_path)
+  return temp_path
+end
+
 ---Find the nearest .devcontainer.json or .devcontainer/devcontainer.json file
 ---@param start_path string path to start searching from
 ---@param callback fun(config_path: string|nil, config_dir: string|nil)
@@ -573,9 +640,24 @@ function M.build(opts)
     output_buf = output_buffer("Build")
   end
 
+  -- Track override config for cleanup
+  local override_config_path = nil
+
   local function on_config_found(path, dir)
     local config_name = path:match("([^/]+)/devcontainer%.json$") or "devcontainer"
     local workspace_folder = dir and vim.fn.fnamemodify(dir, ":h") or vim.loop.cwd()
+
+    -- Create override config if input values are provided
+    local config_to_use = path
+    if opts.input_values then
+      override_config_path = create_override_config(path, opts.input_values)
+      if override_config_path then
+        config_to_use = override_config_path
+        if output_buf then
+          output_buf:append_progress("Using override config with input values")
+        end
+      end
+    end
 
     local function do_build()
       local build_args = {}
@@ -592,9 +674,15 @@ function M.build(opts)
       end
 
        cli.build(workspace_folder, {
-         config = path,
+         config = config_to_use,
          extra_cli_args = #build_args > 0 and build_args or nil,
          on_exit = sched(function(result)
+           -- Cleanup override config if created
+           if override_config_path then
+             vim.fn.delete(override_config_path)
+             log.debug("Cleaned up override config: " .. override_config_path)
+           end
+
            if output_buf then
              if result.code == 0 then
                output_buf:finalize("success")
@@ -638,11 +726,16 @@ function M.build(opts)
     end
 
     cli.read_config(dir or vim.loop.cwd(), {
-      config = path,
+      config = config_to_use,
       include_merged = true,
       extra_cli_args = opts.extra_cli_args,
        on_exit = sched(function(read_result)
           if read_result.code ~= 0 then
+            -- Cleanup override config on error
+            if override_config_path then
+              vim.fn.delete(override_config_path)
+            end
+
             local error_msg = read_result.error or "unknown error"
             -- Decode JSON error messages if present
             local output_buffer = require("devcontainer.internal.output_buffer")
