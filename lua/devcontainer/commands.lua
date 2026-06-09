@@ -654,15 +654,12 @@ function M.build(opts)
             vim.notify("Failed to read devcontainer config: " .. error_msg, vim.log.levels.ERROR)
             return
           end
-           vim.notify("Failed to read devcontainer config: " .. (read_result.error or "unknown error"), vim.log.levels.ERROR)
-           return
-         end
 
-         if output_buf then
-           output_buf:append_progress("Configuration loaded")
-         end
-         do_build()
-       end),
+          if output_buf then
+            output_buf:append_progress("Configuration loaded")
+          end
+          do_build()
+        end),
       stdout = output_buf and function(data)
         if data then
           output_buf:append(data, "stdout")
