@@ -591,30 +591,35 @@ function M.build(opts)
         output_buf:append_progress("Building container image...")
       end
 
-      cli.build(workspace_folder, {
-        config = path,
-        extra_cli_args = #build_args > 0 and build_args or nil,
-        on_exit = sched(function(result)
-          if output_buf then
-            if result.code == 0 then
-              output_buf:finalize("success")
-              vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
-            else
-              output_buf:finalize("error")
-              vim.notify("Failed to build devcontainer: " .. (result.error or "unknown error"), vim.log.levels.ERROR)
-            end
-          else
-            if result.code == 0 then
-              vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
-            else
-              vim.notify("Failed to build devcontainer: " .. (result.error or "unknown error"), vim.log.levels.ERROR)
-            end
-          end
+       cli.build(workspace_folder, {
+         config = path,
+         extra_cli_args = #build_args > 0 and build_args or nil,
+         on_exit = sched(function(result)
+           if output_buf then
+             if result.code == 0 then
+               output_buf:finalize("success")
+               vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
+             else
+               local error_msg = result.error or "unknown error"
+               -- Decode JSON error messages if present
+               local output_buffer = require("devcontainer.internal.output_buffer")
+               error_msg = output_buffer.decode_json_log(error_msg)
+               output_buf:append("Error: " .. error_msg, "stderr")
+               output_buf:finalize("error")
+               vim.notify("Failed to build devcontainer: " .. error_msg, vim.log.levels.ERROR)
+             end
+           else
+             if result.code == 0 then
+               vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
+             else
+               vim.notify("Failed to build devcontainer: " .. (result.error or "unknown error"), vim.log.levels.ERROR)
+             end
+           end
 
-          if type(opts.callback) == "function" then
-            opts.callback()
-          end
-        end),
+           if type(opts.callback) == "function" then
+             opts.callback()
+           end
+         end),
         stdout = output_buf and function(data)
           if data then
             output_buf:append(data, "stdout")
@@ -636,21 +641,25 @@ function M.build(opts)
       config = path,
       include_merged = true,
       extra_cli_args = opts.extra_cli_args,
-      on_exit = sched(function(read_result)
-        if read_result.code ~= 0 then
-          if output_buf then
-            output_buf:append("Failed to read devcontainer config: " .. (read_result.error or "unknown error"), "stderr")
-            output_buf:finalize("error")
-          end
-          vim.notify("Failed to read devcontainer config: " .. (read_result.error or "unknown error"), vim.log.levels.ERROR)
-          return
-        end
+       on_exit = sched(function(read_result)
+         if read_result.code ~= 0 then
+           if output_buf then
+             local error_msg = read_result.error or "unknown error"
+             -- Decode JSON error messages if present
+             local output_buffer = require("devcontainer.internal.output_buffer")
+             error_msg = output_buffer.decode_json_log(error_msg)
+             output_buf:append("Error: " .. error_msg, "stderr")
+             output_buf:finalize("error")
+           end
+           vim.notify("Failed to read devcontainer config: " .. (read_result.error or "unknown error"), vim.log.levels.ERROR)
+           return
+         end
 
-        if output_buf then
-          output_buf:append_progress("Configuration loaded")
-        end
-        do_build()
-      end),
+         if output_buf then
+           output_buf:append_progress("Configuration loaded")
+         end
+         do_build()
+       end),
       stdout = output_buf and function(data)
         if data then
           output_buf:append(data, "stdout")

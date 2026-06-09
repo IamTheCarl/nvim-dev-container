@@ -376,6 +376,13 @@ function OutputBuffer:is_valid()
   return not self.closed
 end
 
+---Decode JSON log line (public function for external use)
+---@param line string JSON line to decode
+---@return string decoded human-readable line
+function M.decode_json_log(line)
+  return decode_json_log(line)
+end
+
 log.wrap(M)
 
 return setmetatable(M, {
