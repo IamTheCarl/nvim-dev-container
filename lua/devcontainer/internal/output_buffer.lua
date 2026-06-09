@@ -279,13 +279,30 @@ function OutputBuffer:append(text, type)
     end
 
     if #lines_to_add > 0 then
-      vim.api.nvim_buf_set_option(captured_self.bufnr, "modifiable", true)
-      vim.api.nvim_buf_set_lines(captured_self.bufnr, -1, -1, false, lines_to_add)
-      vim.api.nvim_buf_set_option(captured_self.bufnr, "modifiable", false)
+      -- CRITICAL: Ensure all lines are free of embedded newlines before adding to buffer
+      -- nvim_buf_set_lines will fail if any line contains newlines
+      local safe_lines = {}
+      for _, line in ipairs(lines_to_add) do
+        if line ~= "" then
+          -- Split each line by newlines just to be safe
+          local split_lines = vim.split(line, "\n", { plain = true })
+          for _, split_line in ipairs(split_lines) do
+            if split_line ~= "" then
+              table.insert(safe_lines, split_line)
+            end
+          end
+        end
+      end
+      
+      if #safe_lines > 0 then
+        vim.api.nvim_buf_set_option(captured_self.bufnr, "modifiable", true)
+        vim.api.nvim_buf_set_lines(captured_self.bufnr, -1, -1, false, safe_lines)
+        vim.api.nvim_buf_set_option(captured_self.bufnr, "modifiable", false)
 
-      -- Auto-scroll to bottom
-      if vim.api.nvim_win_is_valid(captured_self.winid) then
-        vim.api.nvim_win_set_cursor(captured_self.winid, { vim.api.nvim_buf_line_count(captured_self.bufnr), 0 })
+        -- Auto-scroll to bottom
+        if vim.api.nvim_win_is_valid(captured_self.winid) then
+          vim.api.nvim_win_set_cursor(captured_self.winid, { vim.api.nvim_buf_line_count(captured_self.bufnr), 0 })
+        end
       end
     end
   end)
