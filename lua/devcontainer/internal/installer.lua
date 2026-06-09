@@ -19,12 +19,20 @@ local M = {}
 local log = require("devcontainer.internal.log")
 local config = require("devcontainer.config")
 local status = require("devcontainer.status")
+local output_buffer = require("devcontainer.internal.output_buffer")
 
 ---Wrap a callback to run on the main event loop.
 ---@param fn function
 ---@return function
 local function sched(fn)
   return vim.schedule_wrap(fn)
+end
+
+---Format bytes as a human-readable megabytes string.
+---@param bytes integer
+---@return string
+local function fmt_mb(bytes)
+  return string.format("%.1f", bytes / (1024 * 1024))
 end
 
 ---Return the host cache directory for bundles.
@@ -126,7 +134,8 @@ end
 ---automatically.
 ---@param attr string nix flake attribute (e.g. "nixpkgs#neovim")
 ---@param cb fun(bundle_path: string?, err: string?)
-function M.ensure_nix_bundle(attr, cb)
+---@param output_buf? table OutputBuffer instance for streaming build log
+function M.ensure_nix_bundle(attr, cb, output_buf)
   local key = cache_key(attr)
   local bundle_path = cache_dir() .. "/" .. key
 
@@ -136,14 +145,21 @@ function M.ensure_nix_bundle(attr, cb)
       return cb(bundle_path, nil)
     end
     -- Hash missing or mismatch — stale cache; clear and rebuild.
-    vim.notify(
-      "Cached Neovim bundle is out of date, rebuilding...",
-      vim.log.levels.INFO
-    )
+    local stale_msg = "Cached Neovim bundle is out of date, rebuilding..."
+    if output_buf then
+      output_buf:append_progress(stale_msg)
+    else
+      vim.notify(stale_msg, vim.log.levels.INFO)
+    end
     M.clear_cache()
   end
 
-  vim.notify("Building Nix AppImage for " .. attr .. " — this may take a few minutes...", vim.log.levels.INFO)
+  local building_msg = "Building Nix AppImage for " .. attr .. " — this may take a few minutes..."
+  if output_buf then
+    output_buf:append_progress(building_msg)
+  else
+    vim.notify(building_msg, vim.log.levels.INFO)
+  end
 
   local cmd = {
     "nix", "bundle",
@@ -151,9 +167,21 @@ function M.ensure_nix_bundle(attr, cb)
     "--out-link", bundle_path,
     attr,
   }
-  vim.system(cmd, { text = true }, sched(function(res)
+
+  -- Accumulate stderr for the error message regardless of whether we stream.
+  local stderr_acc = {}
+  local stream_cb = output_buf and function(_, data)
+    if data then
+      table.insert(stderr_acc, data)
+      output_buf:append(data, "raw")
+    end
+  end or nil
+
+  vim.system(cmd, { text = true, stdout = stream_cb, stderr = stream_cb }, sched(function(res)
     if res.code ~= 0 then
-      return cb(nil, "nix bundle failed: " .. (res.stderr or "unknown"))
+      local err_detail = table.concat(stderr_acc)
+      if err_detail == "" then err_detail = res.stderr or "unknown" end
+      return cb(nil, "nix bundle failed: " .. err_detail)
     end
     -- `nix bundle --out-link` creates a symlink; resolve to the underlying
     -- AppImage in the nix store.
@@ -318,7 +346,7 @@ end
 ---Orchestrate the full installer pipeline.
 ---Bundles Neovim as an AppImage and extracts it into the container under
 ---`<install_dir>/app/`. Emits `User DevcontainerBuildProgress` autocmds
----for progress UI.
+---for progress UI and streams live output to a split window buffer.
 ---@param container_id string
 ---@param opts? InstallOpts
 function M.install(container_id, opts)
@@ -329,6 +357,9 @@ function M.install(container_id, opts)
   end
 
   local nvim_attr = opts.nvim_attr or M.resolve_nix_source()
+
+  -- Create a live output buffer for the whole install pipeline.
+  local out_buf = output_buffer("build+install neovim")
 
   local build_status = {
     build_title = "Installing Neovim into " .. container_id,
@@ -355,22 +386,32 @@ function M.install(container_id, opts)
     if ok then build_status.progress = 100 end
     emit_progress()
     M.prune_cache()
+    out_buf:finalize(ok and "success" or "error")
     if ok then return on_success() end
     return on_fail(err)
   end
 
-  -- Step 1: bundle nvim as AppImage
+  -- Step 1: bundle nvim as AppImage, streaming nix output to the buffer.
   M.ensure_nix_bundle(nvim_attr, function(nvim_bundle, nerr)
     if not nvim_bundle then return finish(false, nerr) end
     build_status.current_step = 2
     build_status.progress = 50
     emit_progress()
 
+    -- Determine the bundle size for the upload milestone label.
+    local uv = vim.uv or vim.loop
+    local bundle_stat = uv.fs_stat(vim.fn.resolve(nvim_bundle))
+    local size_str = bundle_stat and (" (" .. fmt_mb(bundle_stat.size) .. " MB)") or ""
+    out_buf:append_progress("Uploading Neovim AppImage to container" .. size_str .. " ...")
+
     -- Step 2: stream into container and extract. Per-chunk progress maps
     -- the byte-pump range onto 50..99 so the status UI animates during the
     -- network/disk-bound phase; 100 is reserved for post-extract success.
+    local last_pct = 0
     M.stream_and_extract(container_id, nvim_bundle, function(ok_n, sn_err)
       if not ok_n then return finish(false, sn_err) end
+
+      out_buf:append_progress("Neovim AppImage extracted, setting up /nix/store symlink ...")
 
       -- Step 3: optionally set up /nix/store symlink for direct execution.
       -- This removes AppRun's bwrap user-namespace so sudo works in :terminal.
@@ -392,9 +433,19 @@ function M.install(container_id, opts)
           build_status.progress = pct
           emit_progress()
         end
+
+        -- Append a byte-progress line every 5% or on the final chunk.
+        local upload_pct = math.floor((bytes_written / total) * 100)
+        if upload_pct >= last_pct + 5 or bytes_written == total then
+          last_pct = upload_pct
+          out_buf:append(
+            string.format("  %s MB / %s MB (%d%%)", fmt_mb(bytes_written), fmt_mb(total), upload_pct),
+            "raw"
+          )
+        end
       end
     end))
-  end)
+  end, out_buf)
 end
 
 ---Trim the bundle cache to the newest `config.nvim_cache_versions` entries
