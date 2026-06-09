@@ -245,7 +245,14 @@ function OutputBuffer:append(text, type)
           -- Found a complete JSON object
           local json_str = remaining:sub(json_start, json_end)
           local decoded = decode_json_log(json_str)
-          table.insert(lines_to_add, string.format("[DECODED] %s", decoded))
+          
+          -- Split decoded output by newlines to handle embedded \n in "raw" messages
+          local decoded_lines = vim.split(decoded, "\n", { plain = true })
+          for _, decoded_line in ipairs(decoded_lines) do
+            if decoded_line ~= "" then
+              table.insert(lines_to_add, string.format("[DECODED] %s", decoded_line))
+            end
+          end
 
           -- Move past this JSON object
           remaining = remaining:sub(json_end + 1)
