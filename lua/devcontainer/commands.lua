@@ -20,43 +20,20 @@ local function sched(fn)
   return vim.schedule_wrap(fn)
 end
 
----Create an override devcontainer.json with input values merged into build.args
----@param config_path string path to original devcontainer.json
+---Create an override devcontainer.json with input values merged into build.args.
+---Takes the already-parsed config from cli.read_config() to avoid re-reading and
+---JSONC-stripping the source file.
+---@param config_dir string directory of the original devcontainer.json (for relative path resolution)
+---@param parsed_config table config object from read_result.data.configuration
 ---@param input_values string[] array of "NAME=VALUE" strings
 ---@return string|nil override_config_path path to temporary override file, or nil on error
-local function create_override_config(config_path, input_values)
+local function create_override_config(config_dir, parsed_config, input_values)
   if not input_values or #input_values == 0 then
     return nil
   end
 
-  -- Read original config
-  local file = io.open(config_path, "r")
-  if not file then
-    log.error("Failed to read config file: " .. config_path)
-    return nil
-  end
-  local content = file:read("*a")
-  file:close()
-
-  -- Strip JSONC comments (lines starting with // and trailing comments)
-  -- This is a simple approach for devcontainer.json files
-  local lines = {}
-  for line in content:gmatch("[^\n]+") do
-    -- Remove trailing comments
-    line = line:gsub("//.*$", "")
-    -- Only keep non-empty lines
-    if line:match("[^%s]") then
-      table.insert(lines, line)
-    end
-  end
-  content = table.concat(lines, "\n")
-
-  -- Parse JSON
-  local ok, config = pcall(vim.json.decode, content)
-  if not ok then
-    log.error("Failed to parse config JSON: " .. tostring(config))
-    return nil
-  end
+  -- Deep-copy so we don't mutate the parsed config we received
+  local config = vim.deepcopy(parsed_config)
 
   -- Ensure build.args exists
   if not config.build then
@@ -76,15 +53,8 @@ local function create_override_config(config_path, input_values)
     end
   end
 
-  -- Create override config in the same directory as the original config
-  -- This ensures relative paths (like features) still resolve correctly
-  local config_dir = config_path:match("^(.+)/[^/]+$")
-  if not config_dir then
-    log.error("Failed to determine config directory from: " .. config_path)
-    return nil
-  end
-
-  -- Create override config with a special prefix to indicate it's temporary
+  -- Place the override alongside the original so relative paths (features, Dockerfile, etc.)
+  -- continue to resolve correctly when the CLI uses it as the config source.
   local override_path = config_dir .. "/devcontainer.override.json"
   local override_file = io.open(override_path, "w")
   if not override_file then
@@ -92,7 +62,6 @@ local function create_override_config(config_path, input_values)
     return nil
   end
 
-  -- Write override config
   local ok_write, encoded = pcall(vim.json.encode, config)
   if not ok_write then
     log.error("Failed to encode override config: " .. tostring(encoded))
@@ -661,24 +630,11 @@ function M.build(opts)
     output_buf = output_buffer("Build")
   end
 
-  -- Track override config for cleanup
-  local override_config_path = nil
-
   local function on_config_found(path, dir)
-    local config_name = path:match("([^/]+)/devcontainer%.json$") or "devcontainer"
     local workspace_folder = dir and vim.fn.fnamemodify(dir, ":h") or vim.loop.cwd()
 
-    -- Create override config if input values are provided
-    local config_to_use = path
-    if opts.input_values then
-      override_config_path = create_override_config(path, opts.input_values)
-      if override_config_path then
-        config_to_use = override_config_path
-        if output_buf then
-          output_buf:append_progress("Using override config with input values")
-        end
-      end
-    end
+    -- Will be set inside the read_config callback if input_values are provided.
+    local override_config_path = nil
 
     local function do_build()
       local build_args = {}
@@ -694,41 +650,41 @@ function M.build(opts)
         output_buf:append_progress("Building container image...")
       end
 
-       cli.build(workspace_folder, {
-         config = config_to_use,
-         extra_cli_args = #build_args > 0 and build_args or nil,
-         on_exit = sched(function(result)
-           -- Cleanup override config if created
-           if override_config_path then
-             vim.fn.delete(override_config_path)
-             log.debug("Cleaned up override config: " .. override_config_path)
-           end
+      cli.build(workspace_folder, {
+        -- Use the override config if one was created, otherwise the original.
+        config = override_config_path or path,
+        extra_cli_args = #build_args > 0 and build_args or nil,
+        on_exit = sched(function(result)
+          -- Cleanup override config if created
+          if override_config_path then
+            vim.fn.delete(override_config_path)
+            log.debug("Cleaned up override config: " .. override_config_path)
+          end
 
-           if output_buf then
-             if result.code == 0 then
-               output_buf:finalize("success")
-               vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
-              else
-                local error_msg = result.error or "unknown error"
-                -- Decode JSON error messages if present
-                local output_buffer = require("devcontainer.internal.output_buffer")
-                error_msg = output_buffer.decode_json_logs(error_msg)
-                output_buf:append("Error: " .. error_msg, "stderr")
-                output_buf:finalize("error")
-                vim.notify("Failed to build devcontainer: " .. error_msg, vim.log.levels.ERROR)
-              end
-           else
-             if result.code == 0 then
-               vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
-             else
-               vim.notify("Failed to build devcontainer: " .. (result.error or "unknown error"), vim.log.levels.ERROR)
-             end
-           end
+          if output_buf then
+            if result.code == 0 then
+              output_buf:finalize("success")
+              vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
+            else
+              local error_msg = result.error or "unknown error"
+              local output_buffer = require("devcontainer.internal.output_buffer")
+              error_msg = output_buffer.decode_json_logs(error_msg)
+              output_buf:append("Error: " .. error_msg, "stderr")
+              output_buf:finalize("error")
+              vim.notify("Failed to build devcontainer: " .. error_msg, vim.log.levels.ERROR)
+            end
+          else
+            if result.code == 0 then
+              vim.notify("Devcontainer build completed successfully", vim.log.levels.INFO)
+            else
+              vim.notify("Failed to build devcontainer: " .. (result.error or "unknown error"), vim.log.levels.ERROR)
+            end
+          end
 
-           if type(opts.callback) == "function" then
-             opts.callback()
-           end
-         end),
+          if type(opts.callback) == "function" then
+            opts.callback()
+          end
+        end),
         stdout = output_buf and function(data)
           if data then
             output_buf:append(data, "stdout")
@@ -747,33 +703,43 @@ function M.build(opts)
     end
 
     cli.read_config(dir or vim.loop.cwd(), {
-      config = config_to_use,
+      config = path,
       include_merged = true,
       extra_cli_args = opts.extra_cli_args,
-       on_exit = sched(function(read_result)
-          if read_result.code ~= 0 then
-            -- Cleanup override config on error
-            if override_config_path then
-              vim.fn.delete(override_config_path)
-            end
-
-            local error_msg = read_result.error or "unknown error"
-            -- Decode JSON error messages if present
-            local output_buffer = require("devcontainer.internal.output_buffer")
-            error_msg = output_buffer.decode_json_logs(error_msg)
-            if output_buf then
-              output_buf:append("Error: " .. error_msg, "stderr")
-              output_buf:finalize("error")
-            end
-            vim.notify("Failed to read devcontainer config: " .. error_msg, vim.log.levels.ERROR)
-            return
-          end
-
+      on_exit = sched(function(read_result)
+        if read_result.code ~= 0 then
+          local error_msg = read_result.error or "unknown error"
+          local output_buffer = require("devcontainer.internal.output_buffer")
+          error_msg = output_buffer.decode_json_logs(error_msg)
           if output_buf then
-            output_buf:append_progress("Configuration loaded")
+            output_buf:append("Error: " .. error_msg, "stderr")
+            output_buf:finalize("error")
           end
-          do_build()
-        end),
+          vim.notify("Failed to read devcontainer config: " .. error_msg, vim.log.levels.ERROR)
+          return
+        end
+
+        if output_buf then
+          output_buf:append_progress("Configuration loaded")
+        end
+
+        -- Create the override now that we have the CLI-parsed config, avoiding
+        -- the need to re-read or JSONC-strip the source file ourselves.
+        if opts.input_values then
+          local raw_data = read_result.data
+          local parsed_config = raw_data and raw_data.configuration
+          if parsed_config then
+            override_config_path = create_override_config(dir, parsed_config, opts.input_values)
+            if override_config_path and output_buf then
+              output_buf:append_progress("Using override config with input values")
+            end
+          else
+            log.warn("Could not extract configuration from read-configuration result; input values ignored")
+          end
+        end
+
+        do_build()
+      end),
       stdout = output_buf and function(data)
         if data then
           output_buf:append(data, "stdout")
