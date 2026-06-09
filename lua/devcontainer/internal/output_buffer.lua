@@ -162,21 +162,13 @@ function OutputBuffer:append(text, type)
       return
     end
 
-    -- DEBUG: Always add a marker to see if append is called
-    local lines_to_add = {string.format("[append called: type=%s]", captured_type)}
+    local lines_to_add = {}
 
     -- Decode JSON log lines if this is stdout/stderr from devcontainer CLI
     if captured_type == "stdout" or captured_type == "stderr" then
       -- Prepend any buffered partial JSON from previous calls
       text = captured_self.json_buffer .. text
       captured_self.json_buffer = ""
-      
-      -- DEBUG: Add marker so we know this is stdout/stderr
-      if captured_type == "stdout" then
-        table.insert(lines_to_add, "[STDOUT MARKER]")
-      else
-        table.insert(lines_to_add, "[STDERR MARKER]")
-      end
 
       -- Try to parse each logical line as JSON
       -- For JSON log lines, we need to be careful about embedded newlines in the "text" field
@@ -250,7 +242,7 @@ function OutputBuffer:append(text, type)
           local decoded_lines = vim.split(decoded, "\n", { plain = true })
           for _, decoded_line in ipairs(decoded_lines) do
             if decoded_line ~= "" then
-              table.insert(lines_to_add, string.format("[DECODED] %s", decoded_line))
+              table.insert(lines_to_add, decoded_line)
             end
           end
 
@@ -268,8 +260,7 @@ function OutputBuffer:append(text, type)
         end
       end
     else
-      -- For non-stdout, just split by newlines normally
-      table.insert(lines_to_add, string.format("[TYPE:%s]", captured_type))
+      -- For non-stdout/stderr types (like "info"), just split by newlines normally
       local lines = vim.split(text, "\n", { plain = true })
       for _, line in ipairs(lines) do
         if line ~= "" then
