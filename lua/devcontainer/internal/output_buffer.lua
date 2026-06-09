@@ -13,6 +13,7 @@ local M = {}
 ---@field winid integer window id (if still open)
 ---@field title string buffer title
 ---@field closed boolean whether buffer has been closed
+---@field json_buffer string accumulated partial JSON for fragmented lines
 local OutputBuffer = {}
 OutputBuffer.__index = OutputBuffer
 
@@ -48,6 +49,7 @@ function M.new(title, opts)
     winid = winid,
     title = title,
     closed = false,
+    json_buffer = "",  -- Buffer for accumulating partial JSON across callback invocations
   }, OutputBuffer)
 
   -- Set up keymapping for Enter to close
@@ -89,6 +91,25 @@ local function decode_json_log(line)
     return line
   end
 
+  -- Extract message based on type
+  local message = nil
+  local level_str = ""
+
+  -- Get level display string
+  if data.level then
+    local level_map = {
+      debug = "DEBUG",
+      info = "INFO",
+      warning = "WARN",
+      error = "ERROR",
+      [0] = "DEBUG",
+      [1] = "INFO",
+      [2] = "WARN",
+      [3] = "ERROR",
+    }
+    level_str = level_map[data.level] or tostring(data.level):upper()
+  end
+
   -- For "raw" type messages, just extract and return the text
   -- These contain actual build/output text embedded as JSON
   if data.type == "raw" then
@@ -99,32 +120,22 @@ local function decode_json_log(line)
     return line
   end
 
-  -- For other types, format with level
-  local level = data.level
-  local message = data.text or data.message or ""
-
-  -- If no level, return original line
-  if not level then
+  -- For "text" type, just show the text field (most common)
+  if data.type == "text" then
+    if data.text then
+      return data.text
+    end
     return line
   end
 
-  -- Simplify level names for readability
-  local level_map = {
-    debug = "DEBUG",
-    info = "INFO",
-    warning = "WARN",
-    error = "ERROR",
-    [0] = "DEBUG",
-    [1] = "INFO",
-    [2] = "WARN",
-    [3] = "ERROR",
-  }
+  -- For other types, try to extract message or text field
+  message = data.text or data.message or ""
 
-  local display_level = level_map[level] or tostring(level):upper()
-
-  -- Format: [LEVEL] message
-  if message and message ~= "" then
-    return string.format("[%s] %s", display_level, message)
+  -- If we have level and message, format with level
+  if level_str ~= "" and message and message ~= "" then
+    return string.format("[%s] %s", level_str, message)
+  elseif message and message ~= "" then
+    return message
   else
     return line
   end
@@ -140,13 +151,14 @@ function OutputBuffer:append(text, type)
 
   type = type or "stdout"
   local captured_type = type  -- Capture for closure
+  local captured_self = self  -- Capture self for closure
 
   -- Schedule the append to avoid fast event context issues
   -- (stdout/stderr callbacks run in fast event context)
   vim.schedule(function()
     -- Check if buffer still exists
-    if not vim.api.nvim_buf_is_valid(self.bufnr) then
-      self.closed = true
+    if not vim.api.nvim_buf_is_valid(captured_self.bufnr) then
+      captured_self.closed = true
       return
     end
 
@@ -154,6 +166,10 @@ function OutputBuffer:append(text, type)
 
     -- Decode JSON log lines if this is stdout from devcontainer CLI
     if captured_type == "stdout" then
+      -- Prepend any buffered partial JSON from previous calls
+      text = captured_self.json_buffer .. text
+      captured_self.json_buffer = ""
+
       -- Try to parse each logical line as JSON
       -- For JSON log lines, we need to be careful about embedded newlines in the "text" field
       local remaining = text
@@ -163,9 +179,15 @@ function OutputBuffer:append(text, type)
         if not first_brace then
           -- No JSON object found, add remaining as plain text
           if remaining ~= "" then
-            for _, line in ipairs(vim.split(remaining, "\n", { plain = true })) do
-              if line ~= "" then
-                table.insert(lines_to_add, line)
+            -- Check if this might be the start of a JSON object being fragmented
+            if remaining:match("^%s*{") then
+              -- Looks like the start of JSON, buffer it
+              captured_self.json_buffer = remaining
+            else
+              for _, line in ipairs(vim.split(remaining, "\n", { plain = true })) do
+                if line ~= "" then
+                  table.insert(lines_to_add, line)
+                end
               end
             end
           end
@@ -221,10 +243,10 @@ function OutputBuffer:append(text, type)
           -- Skip leading whitespace/newlines
           remaining = remaining:match("^%s*(.*)$")
         else
-          -- Incomplete JSON, add what we have and stop
+          -- Incomplete JSON, buffer it for next callback
           local partial = remaining:sub(json_start)
           if partial ~= "" then
-            table.insert(lines_to_add, partial)
+            captured_self.json_buffer = partial
           end
           break
         end
@@ -240,13 +262,13 @@ function OutputBuffer:append(text, type)
     end
 
     if #lines_to_add > 0 then
-      vim.api.nvim_buf_set_option(self.bufnr, "modifiable", true)
-      vim.api.nvim_buf_set_lines(self.bufnr, -1, -1, false, lines_to_add)
-      vim.api.nvim_buf_set_option(self.bufnr, "modifiable", false)
+      vim.api.nvim_buf_set_option(captured_self.bufnr, "modifiable", true)
+      vim.api.nvim_buf_set_lines(captured_self.bufnr, -1, -1, false, lines_to_add)
+      vim.api.nvim_buf_set_option(captured_self.bufnr, "modifiable", false)
 
       -- Auto-scroll to bottom
-      if vim.api.nvim_win_is_valid(self.winid) then
-        vim.api.nvim_win_set_cursor(self.winid, { vim.api.nvim_buf_line_count(self.bufnr), 0 })
+      if vim.api.nvim_win_is_valid(captured_self.winid) then
+        vim.api.nvim_win_set_cursor(captured_self.winid, { vim.api.nvim_buf_line_count(captured_self.bufnr), 0 })
       end
     end
   end)
@@ -266,10 +288,18 @@ function OutputBuffer:finalize(status)
     return
   end
 
+  local captured_self = self
+
   -- Schedule to avoid fast event context issues
   vim.schedule(function()
-    if self.closed then
+    if captured_self.closed then
       return
+    end
+
+    -- Flush any remaining JSON buffer content
+    if captured_self.json_buffer and captured_self.json_buffer ~= "" then
+      captured_self:append(captured_self.json_buffer, "stdout")
+      captured_self.json_buffer = ""
     end
 
     local timestamp = os.date("%H:%M:%S")
@@ -281,11 +311,11 @@ function OutputBuffer:finalize(status)
       status_line = string.format("[%s] ✗ Operation failed. Press <CR> to close.", timestamp)
     end
 
-    self:append(status_line, "info")
+    captured_self:append(status_line, "info")
 
     -- Make buffer non-modifiable
-    if vim.api.nvim_buf_is_valid(self.bufnr) then
-      vim.api.nvim_buf_set_option(self.bufnr, "modifiable", false)
+    if vim.api.nvim_buf_is_valid(captured_self.bufnr) then
+      vim.api.nvim_buf_set_option(captured_self.bufnr, "modifiable", false)
     end
   end)
 end
